@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Pocket</title><link rel="stylesheet" href="popup.css"></head>
+<body>
+  <header><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v10a7 7 0 0 1-14 0V4Z"/><path d="m8 10 4 3 4-3"/></svg><h1>Pocket</h1></header>
+  <p id="identity">Connecting…</p>
+  <form id="login" hidden>
+    <label>Server<input id="server" type="url" value="http://127.0.0.1:8787" required autocapitalize="none" spellcheck="false"></label>
+    <label>Username<input id="username" autocomplete="username" required autocapitalize="none" spellcheck="false"></label>
+    <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Sign in as child</button>
+  </form>
+  <section id="controls" hidden>
+    <p id="site" class="site"></p>
+    <button id="toggle">Enable this site</button>
+    <button id="rescan" class="secondary">Check this page</button>
+    <button id="logout" class="text-button">Sign out</button>
+  </section>
+  <p id="status" role="status" aria-live="polite"></p>
+  <p class="caption">Saves clear USD order confirmations on sites you enable. Card and Apple Pay details stay private. Check your balance after each purchase.</p>
+  <script src="popup.js"></script>
+</body></html>

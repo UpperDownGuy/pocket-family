@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "Pocket",
+  "version": "1.0.0",
+  "description": "Save clear order confirmations to your family balance.",
+  "icons": { "512": "icon.svg" },
+  "permissions": ["storage", "nativeMessaging", "activeTab"],
+  "optional_host_permissions": ["https://*/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html", "default_title": "Pocket", "default_icon": "icon.svg" },
+  "content_scripts": [{
+    "matches": ["https://*/*"],
+    "js": ["detector.js", "content.js"],
+    "run_at": "document_idle",
+    "all_frames": false
+  }],
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'" }
+}

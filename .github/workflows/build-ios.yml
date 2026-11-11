@@ -1,0 +1,80 @@
+name: Build iPhone IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pocket-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: iPhone app and Safari extension
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      POCKET_OUTPUT_DIR: ${{ runner.temp }}/pocket-output
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+
+      - name: Check server, receipt capture, and packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test server/tests/*.test.mjs PocketSafari/tests/*.test.cjs tests/*.test.mjs
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          for script in PocketSafari/Resources/*.js; do node --check "$script"; done
+          bash -n scripts/build-ios.sh
+
+      - name: Build device IPA
+        id: ipa
+        shell: bash
+        run: bash scripts/build-ios.sh
+
+      - name: Upload IPA for Windows signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Pocket-unsigned-IPA
+          path: |
+            ${{ env.POCKET_OUTPUT_DIR }}/Pocket-unsigned.ipa
+            ${{ env.POCKET_OUTPUT_DIR }}/Pocket-unsigned.ipa.sha256
+            ${{ env.POCKET_OUTPUT_DIR }}/build-info.json
+            ${{ env.POCKET_OUTPUT_DIR }}/INSTALL-WINDOWS.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload build diagnostics
+        if: ${{ always() && steps.ipa.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Pocket-build-diagnostics
+          path: ${{ env.POCKET_OUTPUT_DIR }}/diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Download instructions
+        if: success()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Pocket IPA is ready
+          Download **Pocket-unsigned-IPA** from this run's **Artifacts** section and extract it.
+          Use **Pocket-unsigned.ipa** in Sideloadly on Windows. It contains both the app and Safari extension.
+          This IPA is intentionally unsigned; it must be signed with your Apple account before installation.
+          No Apple password, certificate, or provisioning profile was used in this cloud build.
+          See **INSTALL-WINDOWS.txt** in the artifact and **WINDOWS-INSTALL.md** in the repository.
+          SUMMARY

@@ -1,0 +1,31 @@
+# Xcode and macOS
+.DS_Store
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+
+# Local server data and logs
+server/node_modules/
+server/data/
+*.log
+
+# Local configuration and Apple credentials
+.env
+.env.*
+!.env.example
+*.p8
+*.p12
+*.mobileprovision
+*.provisionprofile
+*.key
+
+# Cloud build output and Python checks
+*.ipa
+*.xcarchive/
+*.xcresult/
+__pycache__/
+*.pyc
+pocket-output/
