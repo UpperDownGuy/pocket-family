@@ -17,8 +17,6 @@ jobs:
     name: iPhone app and Safari extension
     runs-on: macos-26
     timeout-minutes: 30
-    env:
-      POCKET_OUTPUT_DIR: ${{ runner.temp }}/pocket-output
     steps:
       - name: Check out source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -42,6 +40,8 @@ jobs:
       - name: Build device IPA
         id: ipa
         shell: bash
+        env:
+          POCKET_OUTPUT_DIR: ${{ runner.temp }}/pocket-output
         run: bash scripts/build-ios.sh
 
       - name: Upload IPA for Windows signing
@@ -49,10 +49,10 @@ jobs:
         with:
           name: Pocket-unsigned-IPA
           path: |
-            ${{ env.POCKET_OUTPUT_DIR }}/Pocket-unsigned.ipa
-            ${{ env.POCKET_OUTPUT_DIR }}/Pocket-unsigned.ipa.sha256
-            ${{ env.POCKET_OUTPUT_DIR }}/build-info.json
-            ${{ env.POCKET_OUTPUT_DIR }}/INSTALL-WINDOWS.txt
+            ${{ runner.temp }}/pocket-output/Pocket-unsigned.ipa
+            ${{ runner.temp }}/pocket-output/Pocket-unsigned.ipa.sha256
+            ${{ runner.temp }}/pocket-output/build-info.json
+            ${{ runner.temp }}/pocket-output/INSTALL-WINDOWS.txt
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
@@ -62,7 +62,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Pocket-build-diagnostics
-          path: ${{ env.POCKET_OUTPUT_DIR }}/diagnostics
+          path: ${{ runner.temp }}/pocket-output/diagnostics
           if-no-files-found: warn
           retention-days: 14
 
