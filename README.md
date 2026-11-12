@@ -82,6 +82,8 @@ From the project root:
 node --test server/tests/*.test.mjs PocketSafari/tests/*.test.cjs tests/*.test.mjs
 ```
 
-The checks cover server authorization and recipient routing, duplicate purchases, the receipt detector, browser-message boundaries, and DOM handling. Native compilation and Safari runtime behavior are **not verified on this Windows host**. Build the **Pocket** scheme in Xcode on a Mac, then check one parent and two separate child accounts to confirm that only the parent and the child involved receive each change.
+The checks cover server authorization and recipient routing, duplicate purchases, the receipt detector, browser-message boundaries, and DOM handling. The cloud workflow also runs five IPA validation tests and compiles both native targets for a physical iPhone. [The first successful cloud build](https://github.com/UpperDownGuy/pocket-family/actions/runs/43123900181) used Xcode 26.6; its unsigned IPA passed packaging and checksum checks.
+
+Installation, visual layout, Safari behavior, and push delivery on a physical phone still need device testing. After installing, check one parent and two separate child accounts to confirm that only the parent and the child involved receive each change.
 
 The server stores the family in `server/data/pocket.sqlite`. Keep the data folder when restarting; back it up with the server stopped. Local data, `.env` files, Apple keys, and Xcode user state are excluded from Git.
