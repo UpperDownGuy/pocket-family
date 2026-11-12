@@ -154,7 +154,7 @@ final class AppStore {
 
     func enableNotifications() async throws {
         guard state?.pushConfigured == true else {
-            throw APIError.message("Push alerts need to be configured on the server. Your inbox is available here.")
+            throw APIError.message("Phone alerts need paid Apple Developer signing and server setup. You can still see updates in Inbox.")
         }
         let allowed = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .badge, .sound])
         guard allowed else {

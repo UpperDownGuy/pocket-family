@@ -8,9 +8,9 @@ This is a development app. Amounts are ledger entries; Pocket does not hold or t
 
 ## Build in the cloud and install from Windows
 
-Use the private repository's [Build iPhone IPA workflow](https://github.com/UpperDownGuy/pocket-family/actions/workflows/build-ios.yml) to compile Pocket and its Safari extension on GitHub's macOS runner. Download the successful run's IPA artifact, extract it, and sign `Pocket-unsigned.ipa` with Sideloadly on Windows. The workflow requires no Apple secrets and keeps the Safari extension inside the app.
+Use the public repository's [Build iPhone IPA workflow](https://github.com/UpperDownGuy/pocket-family/actions/workflows/build-ios.yml) to compile Pocket and its Safari extension on GitHub's macOS runner. Download the successful run's IPA artifact, extract it, and sign `Pocket-unsigned.ipa` with Sideloadly on Windows. The workflow requires no Apple secrets and keeps the Safari extension inside the app. The source is public; your family's accounts and records stay on your own server.
 
-Follow the [Windows installation guide](WINDOWS-INSTALL.md) for download, signing, server connection, and Safari setup. This build is unsigned and does not enable APNs; system push alerts require the separate signing configuration below.
+Follow the [Windows installation guide](WINDOWS-INSTALL.md) for download, signing, server connection, and Safari setup. With a free Apple account, use Pocket's **Inbox** for balance alerts. This build does not support background phone notifications; those require the separate paid-team signing setup below.
 
 ## Stripe Link
 
@@ -63,16 +63,18 @@ No Safari payment API reports every purchase across all websites. This extension
 
 ## Notifications
 
-The server always saves recipient-specific inbox entries, regardless of push configuration. They appear when the app syncs. An app that is closed needs Apple Push Notification service (APNs) for system alerts; an inbox entry alone does not produce a remote notification.
+**A free Apple account can use the Inbox now.** Every accepted balance change is saved for all parents and the affected child. Open Pocket and choose **Inbox**; entries update while the app is active and can reach your running server. No Apple push key or notification permission is needed for the Inbox.
 
-Optional APNs setup requires an Apple Developer Program team:
+**The current sideload build cannot show background or lock-screen push alerts.** Developer Mode and iPhone notification settings do not add this capability. Native iOS push requires a paid Apple Developer Program membership; it is unavailable to a free Personal Team. [Apple's supported capabilities](https://developer.apple.com/help/account/reference/supported-capabilities-ios)
 
-1. Enable Push Notifications for your App ID and Xcode target. Set **Code Signing Entitlements** (`CODE_SIGN_ENTITLEMENTS`) to `PocketFamily/Push.entitlements` for development signing.
-2. Create a sandbox-capable APNs signing key in your Apple developer account. Keep the `.p8` key on the server, outside this repository.
-3. In the server's `.env`, set `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_TOPIC` (the app's exact bundle identifier, not the Safari extension's), then restart it. See [server settings](server/README.md).
-4. Rebuild on each device, sign in, and allow notifications in the app. Development-signed builds must use the APNs sandbox environment.
+If you later want native Apple Push Notification service (APNs) alerts, the additional setup is:
 
-The server must be running and able to reach Apple to send pushes. iOS permission, Focus settings, and network availability can affect presentation. See [APNs registration](https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns) and [token-based APNs authentication](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns).
+1. Enable Push Notifications on your paid team's Pocket App ID. Create the app-signing certificate and development provisioning profiles for Pocket and its Safari extension, including the family devices. The app's signed entitlements must contain `aps-environment=development`.
+2. Set up a **separate signed cloud build**, or build with that team in Xcode. The current workflow explicitly clears `CODE_SIGN_ENTITLEMENTS` and produces an unsigned IPA. Adding an entitlement file, configuring the server, or pressing a notification button does not change that workflow. A push-enabled cloud build needs signing/provisioning configuration that is not included in the current setup.
+3. Create a sandbox-enabled APNs authentication key and keep its `.p8` file on the server, outside this repository. This service key is separate from the certificate used to sign the app. Configure `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, and `APNS_TOPIC`, then restart the server. The topic must be the installed app's exact bundle identifier. See [server settings](server/README.md).
+4. Install the properly signed build on each phone, sign in as that family member, and choose **Family → Enable phone alerts** in Pocket. Allow notifications when iOS asks. This server uses the APNs **development sandbox**; TestFlight and production signing require a different APNs environment. [Apple's APNs registration guide](https://developer.apple.com/documentation/usernotifications/registering-your-app-with-apns), [entitlement environments](https://developer.apple.com/documentation/bundleresources/entitlements/aps-environment)
+
+The server must stay running and be able to reach Apple. Push alerts show a generic balance-update message; purchase details remain in the signed-in Inbox. While Pocket is in the foreground, it refreshes the Inbox without a system banner or sound. iOS permission, Focus settings, and network availability can affect push presentation.
 
 ## Verification
 

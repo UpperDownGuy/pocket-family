@@ -92,7 +92,7 @@ struct FamilyView: View {
             List {
                 Section {
                     HStack(spacing: 16) {
-                        Initials(name: store.state?.user.name ?? "", size: 56)
+                        MemberAvatar(name: store.state?.user.name ?? "", memberID: store.state?.user.id ?? "", size: 56)
                         VStack(alignment: .leading, spacing: 5) {
                             Text(store.state?.user.name ?? "").font(.headline)
                             Text(store.state?.user.role == "parent" ? "Parent" : "Child").font(.subheadline).foregroundStyle(.secondary)
@@ -103,27 +103,35 @@ struct FamilyView: View {
                     Section("Members") {
                         ForEach(store.state?.members ?? []) { member in
                             HStack(spacing: 12) {
-                                Initials(name: member.name, size: 34)
+                                MemberAvatar(name: member.name, memberID: member.id, size: 40)
                                 Text(member.name)
                                 Spacer()
                                 Text(member.role == "parent" ? "Parent" : "Child").font(.caption).foregroundStyle(.secondary)
-                            }
+                            }.padding(.vertical, 4)
                         }
                         Button("Add member", systemImage: "person.badge.plus") { showingMember = true }
                     }
                 }
                 Section {
-                    Button("Enable notifications", systemImage: "bell.badge") {
-                        Task {
-                            do {
-                                try await store.enableNotifications()
-                                notificationStatus = "Notification permission updated."
-                            } catch { self.error = error.localizedDescription }
+                    Label("Inbox is on", systemImage: "tray.fill")
+                    if store.state?.pushConfigured == true {
+                        Button("Enable phone alerts", systemImage: "bell.badge") {
+                            error = nil
+                            notificationStatus = nil
+                            Task {
+                                do {
+                                    try await store.enableNotifications()
+                                    notificationStatus = "Notification permission granted."
+                                } catch { self.error = error.localizedDescription }
+                            }
                         }
+                    } else {
+                        Label("Phone alerts need setup", systemImage: "bell.slash")
+                            .foregroundStyle(.secondary)
                     }
                     if let notificationStatus { Text(notificationStatus).font(.footnote).foregroundStyle(.secondary) }
                 } header: { Text("Notifications") } footer: {
-                    Text(store.state?.pushConfigured == true ? "Parents receive every update. Kids receive their own." : "Inbox alerts are on. Phone alerts need push notification setup.")
+                    Text("Open Inbox to see updates. Parents receive every update; kids receive their own. Phone alerts require paid Apple Developer signing and server setup.")
                 }
                 Section {
                     Label("Receipt detection", systemImage: "safari")

@@ -59,7 +59,7 @@ struct BalanceView: View {
                                 } label: {
                                     Panel {
                                         HStack(spacing: 14) {
-                                            Initials(name: child.name)
+                                            MemberAvatar(name: child.name, memberID: child.id)
                                             VStack(alignment: .leading, spacing: 5) {
                                                 Text(child.name).font(.headline)
                                                 Text("Balance").font(.caption).foregroundStyle(.secondary)
@@ -117,7 +117,7 @@ struct ChildDetailView: View {
         List {
             Section {
                 VStack(spacing: 16) {
-                    Initials(name: child?.name ?? "", size: 64)
+                    MemberAvatar(name: child?.name ?? "", memberID: childID, size: 64)
                     Text(usd(child?.balanceCents ?? 0)).font(.system(size: 44, weight: .semibold, design: .rounded)).monospacedDigit()
                     Button("Add or spend", systemImage: "plus") { showingEntry = true }.buttonStyle(.glassProminent)
                 }.frame(maxWidth: .infinity).padding(.vertical, 24)

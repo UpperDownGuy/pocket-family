@@ -4,12 +4,12 @@ Pocket's cloud build compiles the iPhone app and its Safari extension into **Poc
 
 ## Download the IPA
 
-1. Sign in to the GitHub account with access to the [private Pocket repository](https://github.com/UpperDownGuy/pocket-family).
+1. Open the [public Pocket repository](https://github.com/UpperDownGuy/pocket-family). Sign in to GitHub to download workflow artifacts.
 2. Open [Actions → Build iPhone IPA](https://github.com/UpperDownGuy/pocket-family/actions/workflows/build-ios.yml).
 3. Open the latest successful run. Under **Artifacts**, download the Pocket IPA artifact and extract its ZIP.
 4. Use **Pocket-unsigned.ipa** from the extracted folder. Do not give Sideloadly GitHub's outer ZIP or the source-code ZIP.
 
-To build again, select **Run workflow**, keep the `main` branch, and start the run. A push to `main` also builds automatically. Build artifacts are retained for 14 days. The repository stays private; GitHub Actions uses your account's available private-repository minutes and any configured billing limit.
+With repository write access, select **Run workflow**, keep the `main` branch, and start the run to build again. A push to `main` also builds automatically. Build artifacts are retained for 14 days. The repository is public; family records and credentials are stored on your own server and are not included in the source or IPA.
 
 The download includes a SHA-256 checksum and build metadata identifying the source revision and Xcode version. To check the file in PowerShell:
 
@@ -47,7 +47,11 @@ For Safari capture, enable **Pocket** in **Settings → Apps → Safari → Exte
 
 ## Notifications and limits
 
-The inbox works without Apple push credentials. This unsigned sideload build does not include a push entitlement; background system notifications need a separately configured, appropriately signed development build and your APNs provider setup. See the [project guide](README.md#notifications).
+**With your free Apple account, use Pocket → Inbox.** Parents receive entries for every child's balance change; children receive their own. The Inbox updates when Pocket is open and connected to your family server. It needs no Apple push credentials or notification permission.
+
+**This build does not send lock-screen or background phone alerts.** Developer Mode and the iPhone's notification switch cannot enable native push for a free Personal Team. Apple's native push capability requires a paid Developer Program membership. [Apple's supported capabilities](https://developer.apple.com/help/account/reference/supported-capabilities-ios)
+
+If you later get a paid membership, Pocket needs a separate cloud signing/provisioning setup with the correct push entitlement, plus the server's APNs key configuration. The current unsigned workflow explicitly clears the entitlement; changing `.env` or app settings alone is not sufficient. See the [complete notification setup](README.md#notifications). Even with APNs configured, the current app refreshes its Inbox silently while in the foreground.
 
 The extension logs clear USD confirmation pages on enabled sites. It does not read card details, Apple's payment sheet, or all Link purchases. Check the app's Activity after checkout. App and Safari tests on the physical phone remain necessary.
 

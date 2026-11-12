@@ -25,16 +25,55 @@ struct PocketBackground: View {
     }
 }
 
-struct Initials: View {
+struct MemberAvatar: View {
     let name: String
+    let memberID: String
     var size: CGFloat = 42
+
+    private static let colors: [Color] = [
+        Color(red: 0.09, green: 0.43, blue: 0.35),
+        Color(red: 0.19, green: 0.37, blue: 0.65),
+        Color(red: 0.46, green: 0.33, blue: 0.67),
+        Color(red: 0.66, green: 0.27, blue: 0.47),
+        Color(red: 0.67, green: 0.33, blue: 0.17),
+        Color(red: 0.25, green: 0.45, blue: 0.28),
+        Color(red: 0.15, green: 0.43, blue: 0.55),
+        Color(red: 0.36, green: 0.38, blue: 0.66),
+    ]
+
+    private var initials: String {
+        name.split(whereSeparator: \.isWhitespace).prefix(2)
+            .compactMap(\.first).map(String.init).joined().uppercased()
+    }
+
+    private var color: Color {
+        // Stable across launches and devices, even when a member changes their name.
+        let seed = memberID.isEmpty ? name : memberID
+        let hash = seed.utf8.reduce(UInt64(14_695_981_039_346_656_037)) {
+            ($0 ^ UInt64($1)) &* 1_099_511_628_211
+        }
+        return Self.colors[Int(hash % UInt64(Self.colors.count))]
+    }
+
     var body: some View {
-        Text(name.split(separator: " ").prefix(2).compactMap(\.first).map(String.init).joined().uppercased())
-            .font(.system(size: size * 0.33, weight: .semibold, design: .rounded))
-            .foregroundStyle(Color.pocketGreen)
-            .frame(width: size, height: size)
-            .background(Color.pocketMint.opacity(0.36), in: .circle)
-            .accessibilityHidden(true)
+        ZStack {
+            Circle().fill(color)
+            if initials.isEmpty {
+                Image(systemName: "person.fill")
+                    .font(.system(size: size * 0.4, weight: .semibold))
+                    .symbolRenderingMode(.monochrome)
+            } else {
+                Text(initials)
+                    .font(.system(size: size * 0.34, weight: .bold, design: .rounded))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                    .padding(.horizontal, size * 0.12)
+            }
+        }
+        .foregroundStyle(.white)
+        .frame(width: size, height: size)
+        .fixedSize()
+        .accessibilityHidden(true)
     }
 }
 
