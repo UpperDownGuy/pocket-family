@@ -470,6 +470,145 @@ test('health reports supported computer setup and parent logging capabilities wi
   const f = await fixture(t);
   const health = await f.request('GET', '/health');
   assert.equal(health.httpStatus, 200);
-  assert.deepEqual(health.capabilities, { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true } });
+  assert.deepEqual(health.capabilities, { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true } });
   assert.deepEqual(Object.keys(health).sort(), ['capabilities', 'httpStatus', 'pushConfigured', 'setupRequired']);
+});
+
+test('FTS receipts expose normalized item details only to parents and the payment recipient, including after restart', async t => {
+  const f = await fixture(t);
+  const creditCode = code();
+  const reportList = [{ reportId: 'items-report', movieCount: 6, priceCents: 15, items: [
+    { path: 'Movies\\renamed.iso', status: 'renamed', oldPath: 'Movies\\before.iso' },
+    { path: 'Movies/added.iso', status: 'added' }, { path: 'Movies/deleted.iso', status: 'removed' },
+    { path: 'Movies/edited.iso', status: 'modified' },
+  ] }, ...reports('older-count-only', 3)];
+  assert.equal((await f.mint(creditCode, reportList)).httpStatus, 200);
+  assert.equal((await f.redeem(creditCode)).status, 'redeemed');
+  const transactionId = (await f.state(f.child)).transactions[0].id;
+  const path = `/transactions/${transactionId}/items`;
+  const expected = { httpStatus: 200, items: [
+    { reportId: 'items-report', path: 'Movies/added.iso', status: 'added' },
+    { reportId: 'items-report', path: 'Movies/deleted.iso', status: 'removed' },
+    { reportId: 'items-report', path: 'Movies/edited.iso', status: 'modified' },
+    { reportId: 'items-report', path: 'Movies/renamed.iso', status: 'renamed', oldPath: 'Movies/before.iso' },
+  ], totalCount: 9, omittedCount: 5 };
+  for (const who of [f.parent, f.parent2, f.child]) {
+    assert.deepEqual(await f.request('GET', path, undefined, who.token), expected);
+    const state = await f.state(who);
+    assert.equal(JSON.stringify(state).includes('Movies/'), false);
+    assert.equal(state.transactions[0].amountCents, 135);
+    assert.equal(state.notifications.length, 1);
+  }
+  const unknown = '/transactions/00000000-0000-0000-0000-000000000000/items';
+  assert.deepEqual(await f.request('GET', path, undefined, f.sibling.token), await f.request('GET', unknown, undefined, f.sibling.token));
+  assert.equal((await f.request('GET', path)).httpStatus, 401);
+  assert.equal((await f.request('GET', path, undefined, f.issuer.token)).httpStatus, 401);
+  assert.deepEqual((await f.state(f.sibling)).transactions, []);
+  await f.reopen();
+  assert.deepEqual(await f.request('GET', path, undefined, f.child.token), expected);
+  assert.equal((await f.mint(creditCode, reportList)).status, 'redeemed');
+});
+
+test('receipt items are immutable normalized voucher payloads and cannot be added or changed on replay', async t => {
+  const f = await fixture(t);
+  const creditCode = code();
+  const report = { reportId: 'immutable-items', movieCount: 3, priceCents: 15, items: [
+    { path: 'folder\\z.txt', status: 'renamed', oldPath: 'folder\\before.txt' },
+    { path: 'folder\\a.txt', status: 'modified' },
+  ] };
+  assert.equal((await f.mint(creditCode, [report])).httpStatus, 200);
+  const normalized = { ...report, items: [
+    { path: 'folder/a.txt', status: 'modified' },
+    { path: 'folder/z.txt', status: 'renamed', oldPath: 'folder/before.txt' },
+  ] };
+  assert.equal((await f.mint(creditCode, [normalized])).httpStatus, 200);
+  const altered = [
+    { ...normalized, items: undefined }, { ...normalized, items: [] },
+    { ...normalized, items: [{ ...normalized.items[0], path: 'folder/different.txt' }, normalized.items[1]] },
+    { ...normalized, items: [{ ...normalized.items[0], status: 'added' }, normalized.items[1]] },
+    { ...normalized, items: [normalized.items[0], { ...normalized.items[1], oldPath: 'folder/other.txt' }] },
+  ];
+  for (const mutation of altered) assert.equal((await f.mint(creditCode, [mutation])).httpStatus, 409);
+  assert.equal((await f.redeem(creditCode)).status, 'redeemed');
+  assert.equal((await f.mint(creditCode, [normalized])).status, 'redeemed');
+  for (const mutation of altered) assert.equal((await f.mint(creditCode, [mutation])).httpStatus, 409);
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_report_items').get().count, 2);
+  assert.equal((await f.state(f.child)).transactions.length, 1);
+});
+
+test('legacy count-only vouchers retain fingerprints and migrate additively without inventing item details', async t => {
+  const f = await fixture(t);
+  const creditCode = code();
+  const reportList = reports('legacy-pending', 7);
+  assert.equal((await f.mint(creditCode, reportList)).httpStatus, 200);
+  const original = f.app.store.db.prepare('SELECT * FROM fts_vouchers').get();
+  assert.equal(original.fingerprint, createHash('sha256').update(JSON.stringify(reportList)).digest('hex'));
+  f.app.store.db.exec('DROP TABLE fts_report_items');
+  await f.reopen();
+  assert.equal((await f.mint(creditCode, reportList)).httpStatus, 200);
+  assert.equal((await f.mint(creditCode, [{ ...reportList[0], items: [] }])).httpStatus, 200);
+  const retryWithDetails = [{ ...reportList[0], items: [{ path: 'new-detail.txt', status: 'added' }] }];
+  assert.equal((await f.mint(creditCode, retryWithDetails)).httpStatus, 200);
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_report_items').get().count, 0);
+  assert.equal(f.app.store.db.prepare('SELECT fingerprint FROM fts_vouchers').get().fingerprint, original.fingerprint);
+  assert.equal((await f.redeem(creditCode)).status, 'redeemed');
+  const transactionId = (await f.state(f.child)).transactions[0].id;
+  assert.deepEqual(await f.request('GET', `/transactions/${transactionId}/items`, undefined, f.child.token),
+    { httpStatus: 200, items: [], totalCount: 7, omittedCount: 7 });
+  assert.equal((await f.mint(creditCode, retryWithDetails)).status, 'redeemed');
+  assert.equal((await f.mint(creditCode, [{ ...retryWithDetails[0], movieCount: 8 }])).httpStatus, 409);
+  const manual = await f.request('POST', '/transactions', { childId: f.child.user.id, kind: 'addition', amountCents: 15,
+    merchant: 'Allowance', note: '', idempotencyKey: 'manual-receipt-fixture' }, f.parent.token);
+  assert.deepEqual(await f.request('GET', `/transactions/${manual.transaction.id}/items`, undefined, f.child.token),
+    { httpStatus: 200, items: [], totalCount: 0, omittedCount: 0 });
+});
+
+test('receipt items reject invalid status, excessive counts, duplicate paths, and absolute or unsafe paths', async t => {
+  const f = await fixture(t);
+  const invalidItems = [null, {}, 'file.txt', [null], [{}], [{ path: 'file.txt', status: 'unchanged' }],
+    [{ path: 'file.txt', status: 'modified', oldPath: 'old.txt' }],
+    [{ path: 'file.txt', status: 'renamed', oldPath: 'file.txt' }],
+    [{ path: 'same\\file.txt', status: 'modified' }, { path: 'same/file.txt', status: 'added' }],
+    Array.from({ length: 501 }, (_, index) => ({ path: `${index}.txt`, status: 'added' })),
+  ];
+  for (const path of ['', ' ', '/etc/private', 'C:\\Users\\name\\file', 'C:file.txt', '\\\\server\\file', '../file',
+    'a/../file', './file', 'a//file', 'a\nfile', 'a\u0000file', 'a\u0085file', 'a\ud800file', ' file.txt', 'file.txt ', 'file.txt/', 'x'.repeat(501), 42]) {
+    invalidItems.push([{ path, status: 'modified' }]);
+    invalidItems.push([{ path: 'valid.txt', status: 'renamed', oldPath: path }]);
+  }
+  for (const items of invalidItems) {
+    assert.equal((await f.mint(code(), [{ reportId: 'invalid-items', movieCount: 600, priceCents: 15, items }])).httpStatus, 400);
+  }
+  assert.equal((await f.mint(code(), [{ reportId: 'more-items-than-edits', movieCount: 1, priceCents: 15,
+    items: [{ path: 'one', status: 'added' }, { path: 'two', status: 'modified' }] }])).httpStatus, 400);
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_vouchers').get().count, 0);
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_report_items').get().count, 0);
+});
+
+test('only voucher issuance accepts bodies over 16 KiB and it enforces the 512 KiB maximum', async t => {
+  const f = await fixture(t);
+  const items = Array.from({ length: 500 }, (_, index) => ({ path: `${index}-` + 'x'.repeat(350), status: 'modified' }));
+  const accepted = [{ reportId: 'large-receipt', movieCount: 500, priceCents: 15, items }];
+  assert.ok(Buffer.byteLength(JSON.stringify({ code: code(), reports: accepted })) > 16 * 1024);
+  assert.equal((await f.mint(code(), accepted)).httpStatus, 200);
+  const oversized = Array.from({ length: 3 }, (_, index) => ({ ...accepted[0], reportId: `oversized-${index}` }));
+  assert.ok(Buffer.byteLength(JSON.stringify({ code: code(), reports: oversized })) > 512 * 1024);
+  assert.equal((await f.mint(code(), oversized)).httpStatus, 413);
+  assert.equal((await f.request('POST', '/fts/vouchers/status', { code: code(), padding: 'x'.repeat(17000) }, f.issuer.token)).httpStatus, 413);
+  assert.equal((await f.request('POST', '/credits/preview', { code: code(), padding: 'x'.repeat(17000) }, f.child.token)).httpStatus, 413);
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_vouchers').get().count, 1);
+});
+
+test('item persistence failure rolls back the entire voucher and report reservation', async t => {
+  const f = await fixture(t);
+  f.app.store.db.exec("CREATE TRIGGER reject_receipt_item BEFORE INSERT ON fts_report_items BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;");
+  const creditCode = code();
+  const reportList = [{ reportId: 'atomic-items', movieCount: 1, priceCents: 15, items: [{ path: 'file.txt', status: 'modified' }] }];
+  assert.equal((await f.mint(creditCode, reportList)).httpStatus, 500);
+  for (const table of ['fts_vouchers', 'fts_reports', 'fts_report_items', 'transactions']) {
+    assert.equal(f.app.store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0);
+  }
+  f.app.store.db.exec('DROP TRIGGER reject_receipt_item');
+  assert.equal((await f.mint(creditCode, reportList)).httpStatus, 200);
+  assert.equal((await f.redeem(creditCode)).status, 'redeemed');
 });

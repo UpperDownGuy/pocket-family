@@ -33,6 +33,32 @@ function voucherCode(value) {
 const voucherJSON = row => ({ status: row.redeemed_at ? 'redeemed' : row.revoked_at ? 'revoked' : 'issued',
   amountCents: row.amount_cents, reportCount: row.report_count, editCount: row.edit_count,
   createdAt: row.created_at, redeemedAt: row.redeemed_at });
+function reportItemPath(value) {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 500) fail(400, 'Report item paths must be 1–500 characters.');
+  const path = value.replaceAll('\\', '/');
+  if (!path.trim() || path.trim() !== path || /[\u0000-\u001f\u007f-\u009f:]/.test(path) || /[\ud800-\udfff]/u.test(path)
+      || path.split('/').some(part => !part || part === '.' || part === '..')) {
+    fail(400, 'Report item paths must be relative paths without parent traversal or drive names.');
+  }
+  return path;
+}
+function reportItems(value, movieCount) {
+  if (!Array.isArray(value) || value.length > 500 || value.length > movieCount) fail(400, 'Include at most 500 items per report and no more than its edit count.');
+  const paths = new Set();
+  return value.map(item => {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || !['added', 'removed', 'modified', 'renamed'].includes(item.status)) fail(400, 'Each report item needs a valid change status.');
+    const path = reportItemPath(item.path);
+    if (paths.has(path)) fail(400, 'Include each changed path only once per report.');
+    paths.add(path);
+    const result = { path, status: item.status };
+    if (item.oldPath !== undefined) {
+      if (item.status !== 'renamed') fail(400, 'Only renamed items can include an old path.');
+      result.oldPath = reportItemPath(item.oldPath);
+      if (result.oldPath === path) fail(400, 'A renamed item needs different old and new paths.');
+    }
+    return result;
+  }).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+}
 
 export class FamilyStore {
   constructor(path, { setupCode, pushProvider = null } = {}) {
@@ -70,6 +96,9 @@ export class FamilyStore {
         transaction_id TEXT UNIQUE REFERENCES transactions(id));
       CREATE TABLE IF NOT EXISTS fts_reports (report_id TEXT PRIMARY KEY,voucher_hash TEXT NOT NULL REFERENCES fts_vouchers(code_hash),
         movie_count INTEGER NOT NULL CHECK(movie_count>0),price_cents INTEGER NOT NULL CHECK(price_cents>0));
+      CREATE TABLE IF NOT EXISTS fts_report_items (report_id TEXT NOT NULL REFERENCES fts_reports(report_id),
+        position INTEGER NOT NULL,path TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('added','removed','modified','renamed')),
+        old_path TEXT,PRIMARY KEY(report_id,position));
       CREATE INDEX IF NOT EXISTS fts_voucher_issuer ON fts_vouchers(issuer_id);
       CREATE TABLE IF NOT EXISTS fts_pairings (code_hash TEXT PRIMARY KEY,issuer_id TEXT NOT NULL UNIQUE REFERENCES fts_issuers(id),
         expires_at INTEGER NOT NULL,paired_at TEXT);
@@ -243,16 +272,28 @@ export class FamilyStore {
       amountCents += earned;
       editCount += report.movieCount;
       if (!Number.isSafeInteger(amountCents) || amountCents > 1_000_000) fail(400, 'One credit code can add at most $10,000.00.');
-      return { reportId, movieCount: report.movieCount, priceCents: report.priceCents };
+      const normalized = { reportId, movieCount: report.movieCount, priceCents: report.priceCents };
+      if (report.items !== undefined) {
+        const items = reportItems(report.items, report.movieCount);
+        // Count-only requests retain their original fingerprint, including
+        // pending requests created before receipt item storage was introduced.
+        if (items.length) normalized.items = items;
+      }
+      return normalized;
     }).sort((a, b) => a.reportId < b.reportId ? -1 : a.reportId > b.reportId ? 1 : 0);
     const fingerprint = hash(JSON.stringify(reports));
+    const legacyFingerprint = hash(JSON.stringify(reports.map(({ reportId, movieCount, priceCents }) => ({ reportId, movieCount, priceCents }))));
     return this.atomic(() => {
       // Re-read inside the transaction so revocation cannot race issuance.
       const current = this.db.prepare('SELECT revoked_at FROM fts_issuers WHERE id=?').get(issuer.id);
       if (!current || current.revoked_at) fail(403, 'This file tracker has been disconnected.');
       const previous = this.getFTSVoucher(code);
       if (previous) {
-        if (previous.issuer_id !== issuer.id || previous.fingerprint !== fingerprint) fail(409, 'This code was already used for different earnings.');
+        // An older server ignored optional item fields. Honor a pending retry
+        // after upgrade without retroactively changing its count-only receipt.
+        const legacyReplay = previous.fingerprint === legacyFingerprint && !this.db.prepare(`SELECT 1 FROM fts_report_items i
+          JOIN fts_reports r ON r.report_id=i.report_id WHERE r.voucher_hash=? LIMIT 1`).get(previous.code_hash);
+        if (previous.issuer_id !== issuer.id || (previous.fingerprint !== fingerprint && !legacyReplay)) fail(409, 'This code was already used for different earnings.');
         return voucherJSON(previous);
       }
       for (const report of reports) {
@@ -261,7 +302,12 @@ export class FamilyStore {
       const row = { code_hash: hash(code), issuer_id: issuer.id, fingerprint, amount_cents: amountCents,
         report_count: reports.length, edit_count: editCount, created_at: new Date().toISOString(), redeemed_at: null, revoked_at: null };
       this.db.prepare('INSERT INTO fts_vouchers VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL)').run(row.code_hash, issuer.id, fingerprint, amountCents, reports.length, editCount, row.created_at);
-      for (const report of reports) this.db.prepare('INSERT INTO fts_reports VALUES (?,?,?,?)').run(report.reportId, row.code_hash, report.movieCount, report.priceCents);
+      for (const report of reports) {
+        this.db.prepare('INSERT INTO fts_reports VALUES (?,?,?,?)').run(report.reportId, row.code_hash, report.movieCount, report.priceCents);
+        for (const [position, item] of (report.items ?? []).entries()) {
+          this.db.prepare('INSERT INTO fts_report_items VALUES (?,?,?,?,?)').run(report.reportId, position, item.path, item.status, item.oldPath ?? null);
+        }
+      }
       return voucherJSON(row);
     });
   }
@@ -300,6 +346,17 @@ export class FamilyStore {
   }
   balance(childId) {
     return this.db.prepare("SELECT COALESCE(SUM(CASE kind WHEN 'addition' THEN amount_cents ELSE -amount_cents END),0) AS balance FROM transactions WHERE child_id=?").get(childId).balance;
+  }
+  transactionItems(user, transactionId) {
+    const transaction = this.db.prepare('SELECT child_id FROM transactions WHERE id=?').get(transactionId);
+    if (!transaction || (user.role !== 'parent' && transaction.child_id !== user.id)) fail(404, 'Transaction not found.');
+    const voucher = this.db.prepare('SELECT code_hash,edit_count FROM fts_vouchers WHERE transaction_id=?').get(transactionId);
+    if (!voucher) return { items: [], totalCount: 0, omittedCount: 0 };
+    const rows = this.db.prepare(`SELECT i.report_id,i.path,i.status,i.old_path FROM fts_report_items i
+      JOIN fts_reports r ON r.report_id=i.report_id WHERE r.voucher_hash=? ORDER BY i.report_id,i.position`).all(voucher.code_hash);
+    return { items: rows.map(row => ({ reportId: row.report_id, path: row.path, status: row.status,
+      ...(row.old_path === null ? {} : { oldPath: row.old_path }) })), totalCount: voucher.edit_count,
+      omittedCount: voucher.edit_count - rows.length };
   }
   state(user) {
     const members = user.role === 'parent'

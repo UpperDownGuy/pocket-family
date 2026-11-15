@@ -70,19 +70,24 @@ All routes below use JSON. There is no `/api` prefix. Errors return `{ "error": 
 
 | Method / path | Access | Result |
 |---|---|---|
-| `GET /health` | Public | `setupRequired`, `pushConfigured` |
+| `GET /health` | Public | `setupRequired`, `pushConfigured`, `capabilities.fts` (including `itemLists`) |
 | `POST /setup` | One-time setup code | `token`, `user`, `familyName` |
 | `POST /login` | Username/password | `token`, `user`, `familyName` |
 | `POST /logout` | Signed in | Revokes current session and its device registrations |
 | `GET /state` | Signed in | Scoped `user`, `familyName`, `members`, `transactions`, `notifications`, `pushConfigured` |
 | `POST /members` | Parent | Adds `{name,username,password,role}`; returns `member` |
 | `POST /transactions` | Parent; child limited to self/purchase | Adds entry; returns `transaction`, `replayed` |
+| `GET /transactions/:id/items` | Parent or transaction's child | `{items,totalCount,omittedCount}` for an FTS receipt; unknown or unauthorized IDs return 404 |
 | `POST /browser/purchase` | Child | Adds recognized receipt purchase; returns `transaction`, `replayed` |
 | `POST /notifications/read` | Recipient | Marks owned IDs in `{ids:[...]}` read |
 | `POST /devices` | Signed in | Registers `{token}` to current user/session |
 | `DELETE /devices` | Token owner | Removes `{token}` |
 
 Manual transaction fields: `{childId,kind,amountCents,merchant,note,idempotencyKey}`. `kind` is `addition` or `purchase`; amount is 1–1,000,000 cents. `merchant` is the store or addition reason. Reusing an idempotency key with the same normalized payload returns the same transaction; a different payload returns HTTP 409. Purchases can take the tracked balance below zero, including when no opening balance was entered. A purchase already happened and must still be recorded and sent to its recipients. The app is a family ledger, not spending authorization; it does not change the funds in an external card account. Calculated balances must remain within JavaScript's safe integer range.
+
+FTS voucher issuance (`POST /fts/vouchers`, authenticated with the computer credential) accepts optional `items` on each report: `{reportId,movieCount,priceCents,items:[{path,status,oldPath?}]}`. Status is `added`, `removed`, `modified`, or `renamed`; only renamed items may have `oldPath`. Each report can supply up to 500 items and never more than its edit count. Paths are relative, use at most 500 UTF-16 code units, and may not contain drive names, parent traversal, empty/dot segments, control characters, or leading/trailing whitespace. Backslashes normalize to slashes. Duplicate paths within a report are rejected. This route accepts up to 512 KiB of JSON; other routes retain the 16 KiB limit.
+
+Receipt items are stored atomically with their voucher, and normalized details participate in its immutable retry fingerprint. The receipt endpoint returns items as `{reportId,path,status,oldPath?}`; `totalCount` is the paid edit count and `omittedCount` is the number without saved item details. Existing count-only receipts return an empty list with all edits omitted. A retry sent to an older server that ignored item fields remains redeemable after upgrade, without retroactively adding those details. Transactions unrelated to FTS return an empty list and zero counts. Item lists are fetched separately and never included in `/state` or exposed to computer credentials or siblings.
 
 ## Verify
 

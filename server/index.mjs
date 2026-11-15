@@ -37,13 +37,13 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       if (attempt.count > (key.startsWith('ip:') ? 30 : 8)) fail(429, 'Too many attempts. Try again in a minute.');
     }
   }
-  async function body(request) {
+  async function body(request, maximumBytes = 16384) {
     if (!String(request.headers['content-type'] ?? '').startsWith('application/json')) fail(415, 'Send JSON.');
     let size = 0;
     const chunks = [];
     for await (const chunk of request) {
       size += chunk.length;
-      if (size > 16384) fail(413, 'Request is too large.');
+      if (size > maximumBytes) fail(413, 'Request is too large.');
       chunks.push(chunk);
     }
     try {
@@ -63,7 +63,7 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       const route = `${request.method} ${path}`;
       let output;
       if (route === 'GET /health') output = { setupRequired: store.setupRequired, pushConfigured: store.pushConfigured,
-        capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true } } };
+        capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true } } };
       else if (route === 'POST /setup' || route === 'POST /login') {
         const input = await body(request);
         limit(request, input);
@@ -76,7 +76,7 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
         // not family sessions and cannot inspect accounts or spend money.
         const issuer = store.authenticateFTSIssuer(request.headers.authorization, { allowRevoked: route === 'POST /fts/vouchers/status' });
         if (route === 'GET /fts/connection') output = store.ftsConnection(issuer);
-        else if (route === 'POST /fts/vouchers') output = store.issueFTSVoucher(issuer, await body(request));
+        else if (route === 'POST /fts/vouchers') output = store.issueFTSVoucher(issuer, await body(request, 512 * 1024));
         else output = store.ftsVoucherStatus(issuer, await body(request));
       } else {
         const user = store.authenticate(request.headers.authorization);
@@ -90,7 +90,8 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
           output = store.createTransaction(user, await body(request));
           // Delivery happens after the ledger and inbox transaction has committed.
           void store.drainOutbox().catch(() => {});
-        } else if (route === 'GET /fts/issuers') output = store.listFTSIssuers(user);
+        } else if (request.method === 'GET' && /^\/transactions\/[a-f0-9-]{36}\/items$/.test(path)) output = store.transactionItems(user, path.split('/')[2]);
+        else if (route === 'GET /fts/issuers') output = store.listFTSIssuers(user);
         else if (route === 'POST /fts/issuers') output = store.createFTSIssuer(user, await body(request));
         else if (request.method === 'POST' && /^\/fts\/issuers\/[a-f0-9-]{36}\/revoke$/.test(path)) output = store.revokeFTSIssuer(user, path.split('/')[3]);
         else if (route === 'POST /credits/preview') output = store.previewCredit(user, await body(request));
