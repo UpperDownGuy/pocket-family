@@ -17,6 +17,7 @@ const config: ExpoConfig = {
   web: { output: 'static', favicon: './assets/images/pocket.png' },
   plugins: [
     'expo-router', 'expo-secure-store',
+    ['expo-camera', { cameraPermission: 'Pocket uses your camera to scan File Tracker earnings codes.', microphonePermission: false, recordAudioAndroid: false, barcodeScannerEnabled: true }],
     ['expo-splash-screen', { image: './assets/images/pocket.png', imageWidth: 96, backgroundColor: '#F4F6F3', dark: { backgroundColor: '#101B18' } }],
     ['expo-build-properties', { ios: { deploymentTarget: '26.0' }, android: { usesCleartextTraffic: true } }],
     ['./plugins/withPocketSafari.cjs', { enabled: true, sourceDirectory: '../PocketSafari', bundleIdentifier: `${bundleIdentifier}.Safari`, deploymentTarget: '26.0' }],

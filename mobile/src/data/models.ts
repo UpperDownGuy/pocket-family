@@ -74,6 +74,18 @@ export interface TransactionInput {
   idempotencyKey: string;
 }
 
+export interface CreditVoucher {
+  status: 'issued' | 'redeemed' | 'revoked';
+  amountCents: number;
+  reportCount: number;
+  editCount: number;
+  createdAt: string;
+  redeemedAt: string | null;
+}
+export interface CreditRedemption extends CreditVoucher { status: 'redeemed'; replayed: boolean }
+export interface FTSIssuer { id: string; name: string; priceCents: number; createdAt: string; revokedAt: string | null }
+export interface IssuedFTSKey { issuer: FTSIssuer; token: string }
+
 export interface PocketSnapshot {
   state: FamilyState | null;
   serverURL: string;
@@ -92,6 +104,11 @@ export interface PocketActions {
   signOut(): Promise<void>;
   addMember(input: MemberInput): Promise<void>;
   recordTransaction(input: TransactionInput): Promise<void>;
+  previewCredit(code: string): Promise<CreditVoucher>;
+  redeemCredit(code: string, childId?: string): Promise<CreditRedemption>;
+  listFTSIssuers(): Promise<FTSIssuer[]>;
+  createFTSIssuer(name: string, priceCents: number): Promise<IssuedFTSKey>;
+  revokeFTSIssuer(id: string): Promise<FTSIssuer>;
   markRead(ids: string[]): Promise<void>;
   refresh(): Promise<void>;
   clearError(): void;

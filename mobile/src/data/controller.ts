@@ -2,6 +2,7 @@ import { APIError, PocketAPI } from './api';
 import type { FetchTransport } from './api';
 import type { AuthResponse, MemberInput, PocketActions, PocketSnapshot, SetupInput, TransactionInput } from './models';
 import { DEFAULT_SERVER_URL, MAX_TRANSACTION_CENTS, validateServerURL } from './validation';
+import { parseCreditCode } from './credits';
 
 export interface SessionStorage {
   getServerURL(): Promise<string | null>;
@@ -199,6 +200,55 @@ export class PocketController implements PocketActions {
     });
   };
 
+  previewCredit = async (code: string) => this.sessionResult(async session => session.api.previewCredit(session.token, parseCreditCode(code)));
+
+  redeemCredit = async (code: string, childId?: string) => this.sessionResult(async session => {
+    const user = this.snapshot.state?.user;
+    if (!user) throw new Error('Sign in to redeem earnings.');
+    if (user.role === 'child' && childId && childId !== user.id) throw new Error('You can only redeem earnings for yourself.');
+    if (user.role === 'parent' && !this.snapshot.state?.members.some(member => member.id === childId && member.role === 'child')) {
+      throw new Error('Choose a child for these earnings.');
+    }
+    const result = await session.api.redeemCredit(session.token, parseCreditCode(code), user.role === 'parent' ? childId : undefined);
+    this.assertSession(session);
+    // Redemption has committed. A later refresh failure must not imply it failed.
+    try { await this.loadState(session); }
+    catch (error) { this.assertSession(session); await this.handleError(error, session.generation); }
+    return result;
+  });
+
+  listFTSIssuers = async () => this.sessionResult(async session => {
+    this.assertParent();
+    return session.api.listFTSIssuers(session.token);
+  });
+
+  createFTSIssuer = async (name: string, priceCents: number) => this.sessionResult(async session => {
+    this.assertParent();
+    if (!name.trim() || name.trim().length > 100 || !Number.isSafeInteger(priceCents) || priceCents <= 0 || priceCents > MAX_TRANSACTION_CENTS) {
+      throw new Error('Enter a name and a price from $0.01 to $10,000.00.');
+    }
+    return session.api.createFTSIssuer(session.token, name.trim(), priceCents);
+  });
+
+  revokeFTSIssuer = async (id: string) => this.sessionResult(async session => {
+    this.assertParent();
+    return session.api.revokeFTSIssuer(session.token, id);
+  });
+
+  private assertParent(): void {
+    if (this.snapshot.state?.user.role !== 'parent') throw new Error('Only a parent can connect File Tracker.');
+  }
+
+  private async sessionResult<T>(action: (session: Session) => Promise<T>): Promise<T> {
+    const session = this.session();
+    return this.operation(async () => {
+      this.assertSession(session);
+      const result = await action(session);
+      this.assertSession(session);
+      return result;
+    }, session.generation);
+  }
+
   refresh = async (): Promise<void> => {
     if (!this.token) return;
     const expected = this.generation;
@@ -244,10 +294,10 @@ export class PocketController implements PocketActions {
     }
   }
 
-  private async operation(action: () => Promise<void>, expected = this.generation): Promise<void> {
+  private async operation<T>(action: () => Promise<T>, expected = this.generation): Promise<T> {
     this.operationCount++;
     this.update({ busy: true, error: null });
-    try { await action(); }
+    try { return await action(); }
     catch (error) {
       await this.handleError(error, expected);
       throw error;

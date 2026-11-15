@@ -4,7 +4,7 @@ import { View } from 'react-native';
 import { usePocket } from '@/data';
 import { Card, Field, GlassButton, Icon, Notice, Screen, Txt } from '@/components/pocket-ui';
 
-export default function SignIn() {
+export default function SignIn({ notice, nativeHeader = false }: { notice?: string; nativeHeader?: boolean } = {}) {
   const pocket = usePocket();
   const [familyName, setFamilyName] = useState('');
   const [name, setName] = useState('');
@@ -23,8 +23,9 @@ export default function SignIn() {
     } catch (caught) { setError(caught instanceof Error ? caught.message : 'Could not sign in.'); }
     finally { setSubmitting(false); }
   }
-  if (pocket.signedIn) return <Screen title="Connecting"><Card><Txt>Loading your balances.</Txt><Notice message={pocket.error} /><GlassButton label="Try again" onPress={() => void pocket.refresh()} busy={pocket.busy} /><GlassButton label="Server settings" icon="server" onPress={() => router.push('/server')} /><GlassButton label="Sign out" onPress={() => void pocket.signOut().catch(caught => setError(String(caught)))} /><Notice message={error} /></Card></Screen>;
-  return <Screen>
+  if (pocket.signedIn) return <Screen title="Connecting" topSafe={!nativeHeader}><Card><Txt>Loading your balances.</Txt><Notice message={pocket.error} /><GlassButton label="Try again" onPress={() => void pocket.refresh()} busy={pocket.busy} /><GlassButton label="Server settings" icon="server" onPress={() => router.push('/server')} /><GlassButton label="Sign out" onPress={() => void pocket.signOut().catch(caught => setError(String(caught)))} /><Notice message={error} /></Card></Screen>;
+  return <Screen topSafe={!nativeHeader}>
+    {notice && <Card><Txt>{notice}</Txt></Card>}
     <View style={{ gap: 16, paddingTop: 32, paddingBottom: 8 }}><Icon name="wallet" size={48} /><Txt size={46} weight="700">Pocket</Txt><Txt muted size={20}>{pocket.setupRequired ? 'Set up your family' : 'Sign in'}</Txt></View>
     <Card>
       {pocket.setupRequired && <><Field label="Family name" value={familyName} onChangeText={setFamilyName} editable={!submitting} /><Field label="Your name" value={name} onChangeText={setName} textContentType="givenName" editable={!submitting} /></>}

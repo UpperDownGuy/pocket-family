@@ -10,7 +10,7 @@ import { type LedgerTransaction, money } from '@/data';
 const light = { background: '#F4F6F3', card: '#FFFFFF', text: '#172F29', secondary: '#64726C', accent: '#0C6D57', line: '#E2E8E2', soft: '#E5F2EA', danger: '#AD303B' };
 const dark = { background: '#101B18', card: '#1B2924', text: '#F1F6F2', secondary: '#ABBEB3', accent: '#7CD8AE', line: '#31423A', soft: '#263D31', danger: '#FF9DA5' };
 export function usePalette() { return useColorScheme() === 'dark' ? dark : light; }
-export type IconName = 'wallet' | 'activity' | 'inbox' | 'family' | 'plus' | 'bag' | 'chevron' | 'check' | 'server' | 'safari' | 'logout' | 'bellOff' | 'person' | 'close';
+export type IconName = 'wallet' | 'activity' | 'inbox' | 'family' | 'plus' | 'bag' | 'chevron' | 'check' | 'server' | 'safari' | 'logout' | 'bellOff' | 'person' | 'close' | 'qr' | 'computer' | 'copy';
 const icons: Record<IconName, ComponentProps<typeof SymbolView>['name']> = {
   wallet: { ios: 'wallet.bifold.fill', android: 'account_balance_wallet', web: 'account_balance_wallet' },
   activity: { ios: 'arrow.up.arrow.down', android: 'swap_vert', web: 'swap_vert' },
@@ -26,6 +26,9 @@ const icons: Record<IconName, ComponentProps<typeof SymbolView>['name']> = {
   bellOff: { ios: 'bell.slash', android: 'notifications_off', web: 'notifications_off' },
   person: { ios: 'person.fill', android: 'person', web: 'person' },
   close: { ios: 'xmark', android: 'close', web: 'close' },
+  qr: { ios: 'qrcode.viewfinder', android: 'qr_code_scanner', web: 'qr_code_scanner' },
+  computer: { ios: 'desktopcomputer', android: 'computer', web: 'computer' },
+  copy: { ios: 'doc.on.doc', android: 'content_copy', web: 'content_copy' },
 };
 export function Icon({ name, size = 22, color }: { name: IconName; size?: number; color?: string }) {
   const colors = usePalette();
@@ -37,8 +40,11 @@ export function Txt({ children, size = 16, muted = false, weight = '400', style 
 }
 export function Screen({ title, subtitle, children, action, refreshing = false, onRefresh, topSafe = true }: PropsWithChildren<{ title?: string; subtitle?: string; action?: ReactNode; refreshing?: boolean; onRefresh?: () => void; topSafe?: boolean }>) {
   const colors = usePalette();
-  return <SafeAreaView edges={topSafe ? ['top', 'left', 'right'] : ['left', 'right']} style={{ flex: 1, backgroundColor: colors.background }}>
-    <ScrollView automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" contentContainerStyle={styles.screen} refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} /> : undefined}>
+  // UIKit accounts for both native headers and the floating tab bar. Adding a
+  // second top safe area would double the spacing; Android handles top manually.
+  const manualTop = Platform.OS !== 'ios' && topSafe;
+  return <SafeAreaView collapsable={false} edges={manualTop ? ['top', 'left', 'right'] : ['left', 'right']} style={{ flex: 1, backgroundColor: colors.background }}>
+    <ScrollView contentInsetAdjustmentBehavior="automatic" automaticallyAdjustContentInsets automaticallyAdjustsScrollIndicatorInsets automaticallyAdjustKeyboardInsets keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled" contentContainerStyle={styles.screen} refreshControl={onRefresh ? <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} /> : undefined}>
       {title && <View style={styles.heading}><View style={{ flex: 1 }}><Txt size={34} weight="700">{title}</Txt>{subtitle && <Txt muted size={14}>{subtitle}</Txt>}</View>{action}</View>}{children}
     </ScrollView>
   </SafeAreaView>;

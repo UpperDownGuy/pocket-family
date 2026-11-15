@@ -1,5 +1,6 @@
 import type { AuthResponse, FamilyState, MemberInput, ServerHealth, SetupInput, TransactionInput } from './models';
 import { parseAuth, parseFamilyState, parseHealth, validateServerURL } from './validation';
+import { parseCreditCode, parseIssuedKey, parseIssuers, parseRedemption, parseRevokedIssuer, parseVoucher } from './credits';
 
 export class APIError extends Error {
   readonly status: number;
@@ -47,6 +48,16 @@ export class PocketAPI {
   async addMember(token: string, input: MemberInput): Promise<void> { await this.request('/members', { token, body: input }); }
   async recordTransaction(token: string, input: TransactionInput): Promise<void> { await this.request('/transactions', { token, body: input }); }
   async markRead(token: string, ids: string[]): Promise<void> { await this.request('/notifications/read', { token, body: { ids } }); }
+  async previewCredit(token: string, code: string) { return parseVoucher(await this.request('/credits/preview', { token, body: { code: parseCreditCode(code) } })); }
+  async redeemCredit(token: string, code: string, childId?: string) {
+    return parseRedemption(await this.request('/credits/redeem', { token, body: { code: parseCreditCode(code), ...(childId ? { childId } : {}) } }));
+  }
+  async listFTSIssuers(token: string) { return parseIssuers(await this.request('/fts/issuers', { token })); }
+  async createFTSIssuer(token: string, name: string, priceCents: number) { return parseIssuedKey(await this.request('/fts/issuers', { token, body: { name, priceCents } })); }
+  async revokeFTSIssuer(token: string, id: string) {
+    if (!/^[a-zA-Z0-9-]{1,100}$/.test(id)) throw new Error('Choose a valid File Tracker connection.');
+    return parseRevokedIssuer(await this.request(`/fts/issuers/${id}/revoke`, { token, body: {} }));
+  }
 
   private async request(path: string, { token, body }: { token?: string; body?: unknown } = {}): Promise<unknown> {
     const controller = new AbortController();

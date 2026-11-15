@@ -66,6 +66,7 @@ export default function FamilyScreen() {
       ) : null}
       <Section title="Connection">
         <Card><Row icon="server" title="Server" detail={serverURL} onPress={() => router.push('/server')} /></Card>
+        {isParent && <Card><Row icon="computer" title="File Tracker" detail="Connect a computer to issue earnings codes." onPress={() => router.push('/file-tracker')} /></Card>}
       </Section>
       <Section title="Safari purchases">
         <Card style={styles.info}>
