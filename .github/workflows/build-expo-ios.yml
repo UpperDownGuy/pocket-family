@@ -1,0 +1,102 @@
+name: Build Expo iPhone IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'mobile/**'
+      - 'PocketSafari/**'
+      - 'scripts/build-expo-ios.sh'
+      - 'scripts/verify-ipa.py'
+      - '.github/workflows/build-expo-ios.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pocket-expo-ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Expo iPhone app and Safari extension
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install Expo dependencies
+        working-directory: mobile
+        run: npm ci
+
+      - name: Check Expo app and Safari plugin
+        working-directory: mobile
+        env:
+          CI: '1'
+          EXPO_NO_TELEMETRY: '1'
+        run: |
+          npx --no-install tsc --noEmit
+          npx --no-install expo lint
+          npm test
+          node --test tests/plugin*.test.cjs
+
+      - name: Check receipt capture and packaging
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --test PocketSafari/tests/*.test.cjs
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          bash -n scripts/build-expo-ios.sh
+
+      - name: Build Expo device IPA
+        id: ipa
+        shell: bash
+        env:
+          POCKET_OUTPUT_DIR: ${{ runner.temp }}/pocket-expo-output
+        run: bash scripts/build-expo-ios.sh
+
+      - name: Upload Expo IPA for Windows signing
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Pocket-Expo-unsigned-IPA
+          path: |
+            ${{ runner.temp }}/pocket-expo-output/Pocket-Expo-unsigned.ipa
+            ${{ runner.temp }}/pocket-expo-output/Pocket-Expo-unsigned.ipa.sha256
+            ${{ runner.temp }}/pocket-expo-output/build-info.json
+            ${{ runner.temp }}/pocket-expo-output/INSTALL-WINDOWS.txt
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+      - name: Upload Expo build diagnostics
+        if: ${{ always() && steps.ipa.outcome != 'skipped' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Pocket-Expo-build-diagnostics
+          path: ${{ runner.temp }}/pocket-expo-output/diagnostics
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Download instructions
+        if: success()
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'SUMMARY'
+          ## Pocket Expo IPA is ready
+          Download **Pocket-Expo-unsigned-IPA** from this run's **Artifacts** section and extract it.
+          Sign **Pocket-Expo-unsigned.ipa** with Sideloadly on Windows, keeping the Safari extension.
+          It contains a Release JavaScript bundle and runs without Expo Go or a development server.
+          An Apple account is needed when signing on your PC; no Apple credentials were used here.
+          See **INSTALL-WINDOWS.txt** in the artifact and **EXPO.md** in the repository.
+          SUMMARY

@@ -1,0 +1,24 @@
+{
+  "cli": {
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": { "image": "latest" }
+    },
+    "development-simulator": {
+      "extends": "development",
+      "ios": { "simulator": true }
+    },
+    "preview": {
+      "distribution": "internal",
+      "ios": { "image": "latest" }
+    },
+    "production": {
+      "distribution": "store",
+      "ios": { "image": "latest" }
+    }
+  }
+}

@@ -1,6 +1,18 @@
 # Pocket
 
-A private family balance tracker for iPhone, built with SwiftUI, SF Symbols, and native iOS 26 Liquid Glass. A small Node server keeps the family ledger and each person's inbox together.
+A private family balance tracker for iPhone, now with an Expo / React Native app in `mobile/`. It uses native iOS Liquid Glass and connects to the existing Node family server. The original SwiftUI app and Safari extension source are retained.
+
+## Run with Expo from Windows
+
+```powershell
+cd mobile
+npm ci
+npm start
+```
+
+Open the project in Expo Go on your iPhone, then enter your running family server's address in Pocket. See [Expo setup](EXPO.md) for Windows, account setup, and custom builds with the Safari extension. Your existing server accounts and balances carry over. Expo Go supports the app and Inbox; Safari capture requires a custom build.
+
+The instructions below describe the original SwiftUI build. For the Expo app, use [EXPO.md](EXPO.md).
 
 Parents can add money, record purchases, and manage family members. Children can record their own purchases and see their own balance. Every balance change creates an inbox entry for all parents and the affected child. Siblings cannot read one another's balances, purchases, or alerts through the API.
 

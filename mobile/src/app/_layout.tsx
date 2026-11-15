@@ -1,0 +1,27 @@
+import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
+import { StatusBar } from 'expo-status-bar';
+import { ActivityIndicator, useColorScheme, View } from 'react-native';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { PocketProvider, usePocket } from '@/data';
+import { usePalette } from '@/components/pocket-ui';
+
+function Navigation() {
+  const { ready, state } = usePocket();
+  const colors = usePalette();
+  if (!ready) return <View style={{ flex: 1, backgroundColor: colors.background, justifyContent: 'center' }}><ActivityIndicator color={colors.accent} accessibilityLabel="Loading Pocket" /></View>;
+  return <Stack screenOptions={{ headerTintColor: colors.accent, contentStyle: { backgroundColor: colors.background } }}>
+    <Stack.Protected guard={!!state}>
+      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      <Stack.Screen name="entry" options={{ title: 'Add or spend', presentation: 'modal' }} />
+      <Stack.Screen name="member" options={{ title: 'Add member', presentation: 'modal' }} />
+      <Stack.Screen name="child/[id]" options={{ title: 'Balance' }} />
+      <Stack.Screen name="receipt/[id]" options={{ title: 'Details' }} />
+    </Stack.Protected>
+    <Stack.Protected guard={!state}><Stack.Screen name="sign-in" options={{ headerShown: false }} /></Stack.Protected>
+    <Stack.Screen name="server" options={{ title: 'Server', presentation: 'modal' }} />
+  </Stack>;
+}
+export default function RootLayout() {
+  const dark = useColorScheme() === 'dark';
+  return <SafeAreaProvider><ThemeProvider value={dark ? DarkTheme : DefaultTheme}><PocketProvider><StatusBar style={dark ? 'light' : 'dark'} /><Navigation /></PocketProvider></ThemeProvider></SafeAreaProvider>;
+}

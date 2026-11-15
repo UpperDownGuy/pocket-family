@@ -29,3 +29,12 @@ server/data/
 __pycache__/
 *.pyc
 pocket-output/
+
+# Expo app and generated native projects
+mobile/node_modules/
+mobile/.expo/
+mobile/dist/
+mobile/ios/
+mobile/android/
+mobile/expo-env.d.ts
+mobile/.eas/
