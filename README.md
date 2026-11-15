@@ -16,6 +16,8 @@ The instructions below describe the original SwiftUI build. For the Expo app, us
 
 For the existing Windows Docker deployment, see [automatic server updates](AUTO-UPDATE.md). Its scheduled task checks GitHub every minute, backs up before updating, and preserves the existing deployment configuration and volumes.
 
+[File Tracker earnings](FTS-CREDITS.md) connects the Python FTS app to Pocket with single-use QR credits, automatic redemption status, and parent/child scanning flows.
+
 Parents can add money, record purchases, and manage family members. Children can record their own purchases and see their own balance. Every balance change creates an inbox entry for all parents and the affected child. Siblings cannot read one another's balances, purchases, or alerts through the API.
 
 This is a development app. Amounts are ledger entries; Pocket does not hold or transfer money. There are no bank connections or AI services.

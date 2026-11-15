@@ -50,6 +50,13 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
         const input = await body(request);
         limit(request, input);
         output = route === 'POST /setup' ? store.setup(input) : store.login(input);
+      } else if (route === 'GET /fts/connection' || route === 'POST /fts/vouchers' || route === 'POST /fts/vouchers/status') {
+        // Tracker keys can issue and poll credits only. They are deliberately
+        // not family sessions and cannot inspect accounts or spend money.
+        const issuer = store.authenticateFTSIssuer(request.headers.authorization, { allowRevoked: route === 'POST /fts/vouchers/status' });
+        if (route === 'GET /fts/connection') output = store.ftsConnection(issuer);
+        else if (route === 'POST /fts/vouchers') output = store.issueFTSVoucher(issuer, await body(request));
+        else output = store.ftsVoucherStatus(issuer, await body(request));
       } else {
         const user = store.authenticate(request.headers.authorization);
         if (route === 'GET /state') output = store.state(user);
@@ -61,6 +68,13 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
         } else if (route === 'POST /transactions') {
           output = store.createTransaction(user, await body(request));
           // Delivery happens after the ledger and inbox transaction has committed.
+          void store.drainOutbox().catch(() => {});
+        } else if (route === 'GET /fts/issuers') output = store.listFTSIssuers(user);
+        else if (route === 'POST /fts/issuers') output = store.createFTSIssuer(user, await body(request));
+        else if (request.method === 'POST' && /^\/fts\/issuers\/[a-f0-9-]{36}\/revoke$/.test(path)) output = store.revokeFTSIssuer(user, path.split('/')[3]);
+        else if (route === 'POST /credits/preview') output = store.previewCredit(user, await body(request));
+        else if (route === 'POST /credits/redeem') {
+          output = store.redeemCredit(user, await body(request));
           void store.drainOutbox().catch(() => {});
         } else if (route === 'POST /browser/purchase') {
           output = store.browserPurchase(user, await body(request));

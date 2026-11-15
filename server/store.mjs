@@ -21,6 +21,15 @@ const hash = value => createHash('sha256').update(value).digest('hex');
 const publicUser = row => ({ id: row.id, name: row.name, username: row.username, role: row.role });
 const transactionJSON = row => ({ id: row.id, childId: row.child_id, childName: row.child_name, kind: row.kind,
   amountCents: row.amount_cents, merchant: row.merchant, note: row.note, createdAt: row.created_at });
+const issuerJSON = row => ({ id: row.id, name: row.name, priceCents: row.price_cents,
+  createdAt: row.created_at, revokedAt: row.revoked_at });
+function voucherCode(value) {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) fail(400, 'Scan a valid Pocket credit code.');
+  return value;
+}
+const voucherJSON = row => ({ status: row.redeemed_at ? 'redeemed' : row.revoked_at ? 'revoked' : 'issued',
+  amountCents: row.amount_cents, reportCount: row.report_count, editCount: row.edit_count,
+  createdAt: row.created_at, redeemedAt: row.redeemed_at });
 
 export class FamilyStore {
   constructor(path, { setupCode, pushProvider = null } = {}) {
@@ -48,6 +57,17 @@ export class FamilyStore {
       CREATE INDEX IF NOT EXISTS tx_child ON transactions(child_id,created_at);
       CREATE INDEX IF NOT EXISTS notification_recipient ON notifications(recipient_id,created_at);
       CREATE INDEX IF NOT EXISTS outbox_pending ON outbox(status,next_attempt);
+      CREATE TABLE IF NOT EXISTS fts_issuers (id TEXT PRIMARY KEY,name TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,
+        price_cents INTEGER NOT NULL CHECK(price_cents>0),created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL REFERENCES members(id),revoked_at TEXT);
+      CREATE TABLE IF NOT EXISTS fts_vouchers (code_hash TEXT PRIMARY KEY,issuer_id TEXT NOT NULL REFERENCES fts_issuers(id),
+        fingerprint TEXT NOT NULL,amount_cents INTEGER NOT NULL CHECK(amount_cents>0),
+        report_count INTEGER NOT NULL CHECK(report_count>0),edit_count INTEGER NOT NULL CHECK(edit_count>0),
+        created_at TEXT NOT NULL,redeemed_at TEXT,child_id TEXT REFERENCES members(id),
+        transaction_id TEXT UNIQUE REFERENCES transactions(id));
+      CREATE TABLE IF NOT EXISTS fts_reports (report_id TEXT PRIMARY KEY,voucher_hash TEXT NOT NULL REFERENCES fts_vouchers(code_hash),
+        movie_count INTEGER NOT NULL CHECK(movie_count>0),price_cents INTEGER NOT NULL CHECK(price_cents>0));
+      CREATE INDEX IF NOT EXISTS fts_voucher_issuer ON fts_vouchers(issuer_id);
     `);
   }
   atomic(action) {
@@ -106,6 +126,112 @@ export class FamilyStore {
       this.db.prepare('DELETE FROM sessions WHERE hash=?').run(user.sessionHash);
     });
   }
+  createFTSIssuer(user, input) {
+    if (user.role !== 'parent') fail(403, 'Only a parent can connect a file tracker.');
+    const name = text(input.name, 'Tracker name', 1, 60);
+    if (!Number.isSafeInteger(input.priceCents) || input.priceCents <= 0 || input.priceCents > 1_000_000) fail(400, 'Set an edit price between $0.01 and $10,000.00 in whole cents.');
+    const token = 'fts_' + randomBytes(32).toString('base64url');
+    const row = { id: randomUUID(), name, price_cents: input.priceCents, created_at: new Date().toISOString(), revoked_at: null };
+    this.db.prepare('INSERT INTO fts_issuers VALUES (?,?,?,?,?,?,NULL)').run(row.id, name, hash(token), input.priceCents, row.created_at, user.id);
+    return { issuer: issuerJSON(row), token };
+  }
+  listFTSIssuers(user) {
+    if (user.role !== 'parent') fail(403, 'Only a parent can manage file trackers.');
+    return { issuers: this.db.prepare('SELECT * FROM fts_issuers ORDER BY created_at DESC,rowid DESC').all().map(issuerJSON) };
+  }
+  revokeFTSIssuer(user, id) {
+    if (user.role !== 'parent') fail(403, 'Only a parent can disconnect a file tracker.');
+    return this.atomic(() => {
+      const row = this.db.prepare('SELECT * FROM fts_issuers WHERE id=?').get(id);
+      if (!row) fail(404, 'File tracker not found.');
+      row.revoked_at ||= new Date().toISOString();
+      this.db.prepare('UPDATE fts_issuers SET revoked_at=? WHERE id=?').run(row.revoked_at, id);
+      return { issuer: issuerJSON(row), revokedAt: row.revoked_at };
+    });
+  }
+  authenticateFTSIssuer(header, { allowRevoked = false } = {}) {
+    if (typeof header !== 'string' || !/^Bearer fts_[A-Za-z0-9_-]{43}$/.test(header)) fail(401, 'Connect FTS with a parent-issued tracker key.');
+    const row = this.db.prepare('SELECT * FROM fts_issuers WHERE token_hash=?').get(hash(header.slice(7)));
+    if (!row) fail(401, 'The file tracker key is invalid. Reconnect it in Pocket.');
+    if (row.revoked_at && !allowRevoked) fail(403, 'This file tracker was disconnected by a parent.');
+    return row;
+  }
+  ftsConnection(issuer) { return { issuer: issuerJSON(issuer) }; }
+  getFTSVoucher(code) {
+    return this.db.prepare(`SELECT v.*,i.revoked_at FROM fts_vouchers v JOIN fts_issuers i ON i.id=v.issuer_id WHERE v.code_hash=?`).get(hash(voucherCode(code)));
+  }
+  issueFTSVoucher(issuer, input) {
+    const code = voucherCode(input.code);
+    if (!Array.isArray(input.reports) || input.reports.length < 1 || input.reports.length > 100) fail(400, 'Include 1–100 earned reports per credit code.');
+    const seen = new Set();
+    let amountCents = 0;
+    let editCount = 0;
+    const reports = input.reports.map(report => {
+      if (!report || typeof report !== 'object' || Array.isArray(report)) fail(400, 'Each credit needs a report ID and edit count.');
+      const reportId = text(report.reportId, 'Report ID', 1, 200);
+      if (seen.has(reportId)) fail(400, 'Include each report ID only once.');
+      seen.add(reportId);
+      if (!Number.isSafeInteger(report.movieCount) || report.movieCount < 1 || report.movieCount > 1_000_000) fail(400, 'Each report must contain 1–1,000,000 earned edits.');
+      if (!Number.isSafeInteger(report.priceCents) || report.priceCents !== issuer.price_cents) fail(400, 'The report price must match the edit price approved in Pocket.');
+      const earned = report.movieCount * issuer.price_cents;
+      amountCents += earned;
+      editCount += report.movieCount;
+      if (!Number.isSafeInteger(amountCents) || amountCents > 1_000_000) fail(400, 'One credit code can add at most $10,000.00.');
+      return { reportId, movieCount: report.movieCount, priceCents: report.priceCents };
+    }).sort((a, b) => a.reportId < b.reportId ? -1 : a.reportId > b.reportId ? 1 : 0);
+    const fingerprint = hash(JSON.stringify(reports));
+    return this.atomic(() => {
+      // Re-read inside the transaction so revocation cannot race issuance.
+      const current = this.db.prepare('SELECT revoked_at FROM fts_issuers WHERE id=?').get(issuer.id);
+      if (!current || current.revoked_at) fail(403, 'This file tracker was disconnected by a parent.');
+      const previous = this.getFTSVoucher(code);
+      if (previous) {
+        if (previous.issuer_id !== issuer.id || previous.fingerprint !== fingerprint) fail(409, 'This code was already used for different earnings.');
+        return voucherJSON(previous);
+      }
+      for (const report of reports) {
+        if (this.db.prepare('SELECT report_id FROM fts_reports WHERE report_id=?').get(report.reportId)) fail(409, 'One of these reports already has a Pocket credit code. Reopen its existing code.');
+      }
+      const row = { code_hash: hash(code), issuer_id: issuer.id, fingerprint, amount_cents: amountCents,
+        report_count: reports.length, edit_count: editCount, created_at: new Date().toISOString(), redeemed_at: null, revoked_at: null };
+      this.db.prepare('INSERT INTO fts_vouchers VALUES (?,?,?,?,?,?,?,NULL,NULL,NULL)').run(row.code_hash, issuer.id, fingerprint, amountCents, reports.length, editCount, row.created_at);
+      for (const report of reports) this.db.prepare('INSERT INTO fts_reports VALUES (?,?,?,?)').run(report.reportId, row.code_hash, report.movieCount, report.priceCents);
+      return voucherJSON(row);
+    });
+  }
+  ftsVoucherStatus(issuer, input) {
+    const row = this.getFTSVoucher(input.code);
+    if (!row || row.issuer_id !== issuer.id) fail(404, 'Credit code not found for this file tracker.');
+    return voucherJSON(row);
+  }
+  previewCredit(_user, input) {
+    const row = this.getFTSVoucher(input.code);
+    if (!row) fail(404, 'Credit code not found. Check that Pocket is connected to the same family server as FTS.');
+    return voucherJSON(row);
+  }
+  redeemCredit(user, input) {
+    const code = voucherCode(input.code);
+    const childId = user.role === 'child' ? user.id : text(input.childId, 'Child', 1, 80);
+    if (user.role === 'child' && input.childId !== undefined && input.childId !== user.id) fail(403, 'You can only redeem a credit into your own account.');
+    return this.atomic(() => {
+      const row = this.getFTSVoucher(code);
+      if (!row) fail(404, 'Credit code not found.');
+      if (row.redeemed_at) {
+        if (row.child_id !== childId) fail(409, 'This credit code has already been redeemed.');
+        return { ...voucherJSON(row), replayed: true };
+      }
+      if (row.revoked_at) fail(403, 'This file tracker was disconnected by a parent. This code cannot be redeemed.');
+      const entry = { childId, kind: 'addition', amountCents: row.amount_cents, merchant: 'File edits',
+        note: `${row.edit_count} edits · ${row.report_count} ${row.report_count === 1 ? 'report' : 'reports'}`,
+        idempotencyKey: 'fts:' + randomUUID(), fingerprint: hash('fts:' + row.code_hash) };
+      // The issuer authorized the immutable amount. This internal insert stays
+      // in the same transaction as consuming the code and creating all alerts.
+      const result = this.appendTransaction(user, entry);
+      row.redeemed_at = result.transaction.createdAt;
+      this.db.prepare('UPDATE fts_vouchers SET redeemed_at=?,child_id=?,transaction_id=? WHERE code_hash=?').run(row.redeemed_at, childId, result.transaction.id, row.code_hash);
+      return { ...voucherJSON(row), replayed: false };
+    });
+  }
   balance(childId) {
     return this.db.prepare("SELECT COALESCE(SUM(CASE kind WHEN 'addition' THEN amount_cents ELSE -amount_cents END),0) AS balance FROM transactions WHERE child_id=?").get(childId).balance;
   }
@@ -138,6 +264,13 @@ export class FamilyStore {
         if (previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different entry.');
         return { transaction: transactionJSON(previous), replayed: true };
       }
+      return this.appendTransaction(user, { childId, kind: input.kind, amountCents: input.amountCents, merchant, note, idempotencyKey, fingerprint });
+    });
+  }
+  // Call only within an existing atomic operation after authorization and
+  // amount validation. Both ordinary entries and QR redemption share alerts.
+  appendTransaction(user, input) {
+      const { childId, merchant, note, idempotencyKey, fingerprint } = input;
       const child = this.db.prepare("SELECT * FROM members WHERE id=? AND role='child'").get(childId);
       if (!child) fail(404, 'Child not found.');
       // This is a record of money already spent, not a card authorization.
@@ -160,7 +293,6 @@ export class FamilyStore {
         }
       }
       return { transaction: { id, childId, childName: child.name, kind: input.kind, amountCents: input.amountCents, merchant, note, createdAt }, replayed: false };
-    });
   }
   browserPurchase(user, input) {
     if (user.role !== 'child') fail(403, 'Sign in with the child account that made this purchase.');
