@@ -185,6 +185,25 @@ test('late deletion success or rejection cannot clear another account or server 
   }
 });
 
+test('a refresh discovering the deleted session before DELETE replies cannot retain its family hint', async () => {
+  const held = deferred<FetchResponse>();
+  const started = deferred<void>();
+  let deleted = false;
+  const { controller, storage } = await fixture(async path => {
+    if (path === '/family') { deleted = true; started.resolve(); return held.promise; }
+    if (path === '/state' && deleted) return response({ error: 'Session expired' }, 401);
+    return undefined;
+  });
+  const deleting = controller.deleteFamily(context);
+  await started.promise;
+  await controller.refresh();
+  assert.equal(controller.getSnapshot().signedIn, false);
+  held.resolve(response({ ok: true }));
+  await assert.rejects(deleting, /replaced/);
+  assert.equal(controller.getSnapshot().familyCodeHint, '');
+  assert.equal(storage.tokens.has(serverURL), false);
+});
+
 test('real API deletion signs out its parent and leaves another family usable', async t => {
   const app = createFamilyServer({ dbPath: ':memory:' });
   await new Promise<void>(resolve => app.server.listen(0, '127.0.0.1', resolve));

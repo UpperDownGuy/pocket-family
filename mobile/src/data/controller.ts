@@ -182,6 +182,9 @@ export class PocketController implements PocketActions {
       // signed in while the server was deleting it. Never sign that account out.
       for (const member of family.members) this.pendingTransactions.delete(`${session.api.serverURL}\n${member.id}`);
       if (this.familyCodes.get(session.api.serverURL) === code) this.familyCodes.delete(session.api.serverURL);
+      // A foreground refresh can discover the deleted session before DELETE's
+      // reply arrives. Clear that signed-out hint without touching a new login.
+      if (!this.token && this.snapshot.serverURL === session.api.serverURL && this.snapshot.familyCodeHint === code) this.update({ familyCodeHint: '' });
       this.assertSession(session);
       const clearedGeneration = this.beginSessionChange();
       this.update({ familyCodeHint: '' });
