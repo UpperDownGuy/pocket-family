@@ -84,7 +84,7 @@ export interface CreditVoucher {
 }
 export interface CreditRedemption extends CreditVoucher { status: 'redeemed'; replayed: boolean }
 export interface FTSIssuer { id: string; name: string; priceCents: number; createdAt: string; revokedAt: string | null }
-export interface IssuedFTSKey { issuer: FTSIssuer; token: string }
+export interface IssuedFTSKey { issuer: FTSIssuer; setupCode: string; expiresAt: string }
 
 export interface PocketSnapshot {
   state: FamilyState | null;

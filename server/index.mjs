@@ -4,9 +4,26 @@ import { resolve } from 'node:path';
 import { APIError, FamilyStore, fail } from './store.mjs';
 import { createAPNsProvider } from './apns.mjs';
 
+export function createFTSPairingLimiter(clock = Date.now) {
+  const attempts = new Map();
+  return ip => {
+    const now = clock();
+    for (const [key, value] of attempts) if (value.until <= now) attempts.delete(key);
+    // Count the server-wide budget first, limiting memory even if requests use
+    // many addresses. Forwarded headers cannot override the connection's IP.
+    for (const [key, maximum] of [['all', 30], [`ip:${ip}`, 10]]) {
+      const attempt = attempts.get(key) ?? { count: 0, until: now + 60000 };
+      attempt.count += 1;
+      attempts.set(key, attempt);
+      if (attempt.count > maximum) fail(429, 'Too many setup attempts. Try again in a minute.');
+    }
+  };
+}
+
 export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode, pushProvider = null } = {}) {
   const store = new FamilyStore(dbPath, { setupCode, pushProvider });
   const attempts = new Map();
+  const limitPairing = createFTSPairingLimiter();
   let closing = false;
   function limit(request, input) {
     const now = Date.now();
@@ -50,6 +67,9 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
         const input = await body(request);
         limit(request, input);
         output = route === 'POST /setup' ? store.setup(input) : store.login(input);
+      } else if (route === 'POST /fts/pair') {
+        limitPairing(request.socket.remoteAddress);
+        output = store.pairFTSIssuer(await body(request));
       } else if (route === 'GET /fts/connection' || route === 'POST /fts/vouchers' || route === 'POST /fts/vouchers/status') {
         // Tracker keys can issue and poll credits only. They are deliberately
         // not family sessions and cannot inspect accounts or spend money.

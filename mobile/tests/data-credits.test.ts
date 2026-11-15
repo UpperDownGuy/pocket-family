@@ -4,6 +4,7 @@ import test from 'node:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { createFamilyServer } from '../../server/index.mjs';
 import { APIError, PocketAPI } from '../src/data/api';
@@ -16,6 +17,7 @@ const code = 'C'.repeat(43);
 const parent = { id: 'parent-1', name: 'Parent', username: 'parent', role: 'parent' as const };
 const child = { id: 'child-1', name: 'Child', username: 'child', role: 'child' as const, balanceCents: 0 };
 const issuer = { id: 'issuer-1', name: 'Desktop', priceCents: 15, createdAt: '2026-11-15T12:00:00.000Z', revokedAt: null };
+const setupKey = { issuer, setupCode: '01234567', expiresAt: '2026-11-15T12:10:00.000Z' };
 const voucher = { status: 'issued', amountCents: 45, reportCount: 1, editCount: 3, createdAt: '2026-11-15T12:00:00.000Z', redeemedAt: null };
 function response(value: unknown, status = 200): FetchResponse { return { status, json: async () => value }; }
 function deferred<T>() {
@@ -56,6 +58,18 @@ test('earnings payload validators reject invented amounts, inconsistent redempti
   assert.throws(() => parseIssuedKey({ issuer, token: 'bad-key' }));
 });
 
+test('setup keys keep all eight ASCII digits, including leading zeros, and require an expiry', () => {
+  assert.deepEqual(parseIssuedKey(setupKey), setupKey);
+  assert.equal(parseIssuedKey({ ...setupKey, setupCode: '00000000' }).setupCode, '00000000');
+  assert.deepEqual(parseIssuedKey({ ...setupKey, token: 'do-not-forward' }), setupKey);
+  for (const value of [1234567, 12345678, null, '1234567', '012345678', '1234abcd', '１２３４５６７８', '١٢٣٤٥٦٧٨', ' 01234567', '01234567 ']) {
+    assert.throws(() => parseIssuedKey({ ...setupKey, setupCode: value }));
+  }
+  for (const expiresAt of [undefined, null, 1_000_000, 'not-a-date']) {
+    assert.throws(() => parseIssuedKey({ ...setupKey, expiresAt }));
+  }
+});
+
 test('credit APIs keep redemption codes out of URLs and use only the configured server with existing session authentication', async () => {
   const calls: { url: string; options: Parameters<FetchTransport>[1] }[] = [];
   const api = new PocketAPI('https://family.example', async (url, options) => { calls.push({ url, options }); return response(voucher); });
@@ -70,7 +84,7 @@ test('credit APIs keep redemption codes out of URLs and use only the configured 
   assert.equal(calls.length, 1);
 });
 
-test('an integration key arriving after sign-out is rejected instead of being exposed to the next account', async () => {
+test('a setup key arriving after sign-out is rejected instead of being exposed to the next account', async () => {
   const pending = deferred<FetchResponse>();
   const started = deferred<void>();
   const current: FamilyState = { user: parent, members: [parent, child], familyName: 'Test', transactions: [], notifications: [], pushConfigured: false };
@@ -89,7 +103,7 @@ test('an integration key arriving after sign-out is rejected instead of being ex
   const rejection = assert.rejects(result, /replaced by another sign-in/);
   await started.promise;
   await controller.signOut();
-  pending.resolve(response({ issuer, token: `fts_${'A'.repeat(43)}` }));
+  pending.resolve(response(setupKey));
   await rejection;
   assert.equal(controller.getSnapshot().state, null);
 });
@@ -104,7 +118,7 @@ test('a child can manage their File Tracker connection while sibling redemption 
     if (path === '/state') return response(current);
     creditCalls++;
     if (path === '/fts/issuers') return options.method === 'POST'
-      ? response({ issuer, token: `fts_${'A'.repeat(43)}` }) : response({ issuers: [issuer] });
+      ? response(setupKey) : response({ issuers: [issuer] });
     if (path === '/fts/issuers/issuer-1/revoke') return response({ issuer: { ...issuer, revokedAt: '2026-11-15T12:05:00Z' } });
     return response({});
   });
@@ -131,6 +145,12 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   const avery = await api.signIn('avery', 'child-password');
   const jordan = await api.signIn('jordan', 'child-password');
   const created = await api.createFTSIssuer(owner.token, 'FTS Desktop', 15);
+  assert.match(created.setupCode, /^[0-9]{8}$/);
+  const credential = `fts_${randomBytes(32).toString('base64url')}`;
+  const pairing = await fetch(`${url}/fts/pair`, { method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ setupCode: created.setupCode, credential }) });
+  assert.equal(pairing.status, 200);
+  assert.equal((await pairing.json()).issuer.id, created.issuer.id);
   assert.equal((await api.listFTSIssuers(owner.token))[0].id, created.issuer.id);
   const childConnection = await api.createFTSIssuer(avery.token, 'Avery Desktop', 25);
   assert.deepEqual((await api.listFTSIssuers(avery.token)).map(value => value.id), [childConnection.issuer.id]);
@@ -140,7 +160,7 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   await assert.rejects(api.revokeFTSIssuer(avery.token, created.issuer.id), error => error instanceof APIError && error.status === 404);
   assert.ok((await api.revokeFTSIssuer(avery.token, childConnection.issuer.id)).revokedAt);
   async function issue(value: string, id: string) {
-    const result = await fetch(`${url}/fts/vouchers`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${created.token}` },
+    const result = await fetch(`${url}/fts/vouchers`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
       body: JSON.stringify({ code: value, reports: [{ reportId: id, movieCount: 3, priceCents: 15 }] }) });
     assert.equal(result.status, 200);
   }

@@ -46,8 +46,8 @@ export function parseIssuers(value: unknown): FTSIssuer[] {
 }
 
 export function parseIssuedKey(value: unknown): IssuedFTSKey {
-  if (!object(value) || typeof value.token !== 'string' || !/^fts_[A-Za-z0-9_-]{43}$/.test(value.token)) invalid();
-  return { issuer: parseIssuer(value.issuer), token: value.token };
+  if (!object(value) || typeof value.setupCode !== 'string' || !/^[0-9]{8}$/.test(value.setupCode) || !date(value.expiresAt)) invalid();
+  return { issuer: parseIssuer(value.issuer), setupCode: value.setupCode, expiresAt: value.expiresAt };
 }
 
 export function parseRevokedIssuer(value: unknown): FTSIssuer {

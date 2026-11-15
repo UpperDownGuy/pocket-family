@@ -1,5 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 
@@ -68,6 +68,8 @@ export class FamilyStore {
       CREATE TABLE IF NOT EXISTS fts_reports (report_id TEXT PRIMARY KEY,voucher_hash TEXT NOT NULL REFERENCES fts_vouchers(code_hash),
         movie_count INTEGER NOT NULL CHECK(movie_count>0),price_cents INTEGER NOT NULL CHECK(price_cents>0));
       CREATE INDEX IF NOT EXISTS fts_voucher_issuer ON fts_vouchers(issuer_id);
+      CREATE TABLE IF NOT EXISTS fts_pairings (code_hash TEXT PRIMARY KEY,issuer_id TEXT NOT NULL UNIQUE REFERENCES fts_issuers(id),
+        expires_at INTEGER NOT NULL,paired_at TEXT);
     `);
   }
   atomic(action) {
@@ -129,10 +131,44 @@ export class FamilyStore {
   createFTSIssuer(user, input) {
     const name = text(input.name, 'Tracker name', 1, 60);
     if (!Number.isSafeInteger(input.priceCents) || input.priceCents <= 0 || input.priceCents > 1_000_000) fail(400, 'Set an edit price between $0.01 and $10,000.00 in whole cents.');
-    const token = 'fts_' + randomBytes(32).toString('base64url');
-    const row = { id: randomUUID(), name, price_cents: input.priceCents, created_at: new Date().toISOString(), revoked_at: null };
-    this.db.prepare('INSERT INTO fts_issuers VALUES (?,?,?,?,?,?,NULL)').run(row.id, name, hash(token), input.priceCents, row.created_at, user.id);
-    return { issuer: issuerJSON(row), token };
+    return this.atomic(() => {
+      let setupCode;
+      for (let attempt = 0; attempt < 32; attempt += 1) {
+        const candidate = this.generateFTSSetupCode();
+        if (!this.db.prepare('SELECT code_hash FROM fts_pairings WHERE code_hash=?').get(hash(candidate))) { setupCode = candidate; break; }
+      }
+      if (setupCode === undefined) fail(503, 'Could not create a setup code. Try again.');
+      // The initial strong credential is never exposed or usable by the app.
+      // FTS supplies its own persisted credential during the one-time pairing.
+      const token = 'fts_' + randomBytes(32).toString('base64url');
+      const row = { id: randomUUID(), name, price_cents: input.priceCents, created_at: new Date().toISOString(), revoked_at: null };
+      const expiresAt = Date.now() + 10 * 60 * 1000;
+      this.db.prepare('INSERT INTO fts_issuers VALUES (?,?,?,?,?,?,NULL)').run(row.id, name, hash(token), input.priceCents, row.created_at, user.id);
+      this.db.prepare('INSERT INTO fts_pairings VALUES (?,?,?,NULL)').run(hash(setupCode), row.id, expiresAt);
+      return { issuer: issuerJSON(row), setupCode, expiresAt: new Date(expiresAt).toISOString() };
+    });
+  }
+  generateFTSSetupCode() { return randomInt(100_000_000).toString().padStart(8, '0'); }
+  pairFTSIssuer(input) {
+    if (typeof input.setupCode !== 'string' || !/^[0-9]{8}$/.test(input.setupCode)) fail(400, 'Enter the eight-digit setup code from Pocket.');
+    if (typeof input.credential !== 'string' || !/^fts_[A-Za-z0-9_-]{43}$/.test(input.credential)) fail(400, 'FTS must provide a valid connection credential.');
+    const credentialHash = hash(input.credential);
+    return this.atomic(() => {
+      const row = this.db.prepare(`SELECT i.*,p.expires_at,p.paired_at FROM fts_pairings p JOIN fts_issuers i ON i.id=p.issuer_id WHERE p.code_hash=?`).get(hash(input.setupCode));
+      if (!row) fail(400, 'That setup code is invalid. Generate a new one in Pocket.');
+      if (row.revoked_at) fail(403, 'This file tracker has been disconnected. Generate a new setup code in Pocket.');
+      if (row.paired_at) {
+        // An exact retry proves possession of the already paired credential,
+        // so it remains safe even if the original response arrived after expiry.
+        if (row.token_hash !== credentialHash) fail(409, 'That setup code has already been used. Generate a new one in Pocket.');
+        return { issuer: issuerJSON(row) };
+      }
+      if (row.expires_at <= Date.now()) fail(410, 'That setup code has expired. Generate a new one in Pocket.');
+      if (this.db.prepare('SELECT id FROM fts_issuers WHERE token_hash=? AND id<>?').get(credentialHash, row.id)) fail(409, 'Use a fresh FTS connection credential for this setup code.');
+      this.db.prepare('UPDATE fts_issuers SET token_hash=? WHERE id=?').run(credentialHash, row.id);
+      this.db.prepare('UPDATE fts_pairings SET paired_at=? WHERE issuer_id=?').run(new Date().toISOString(), row.id);
+      return { issuer: issuerJSON(row) };
+    });
   }
   listFTSIssuers(user) {
     const rows = user.role === 'parent'
