@@ -50,6 +50,7 @@ export function PocketProvider({ children }: PropsWithChildren) {
     signOut: controller.signOut,
     addMember: controller.addMember,
     recordTransaction: controller.recordTransaction,
+    transactionItems: controller.transactionItems,
     previewCredit: controller.previewCredit,
     redeemCredit: controller.redeemCredit,
     listFTSIssuers: controller.listFTSIssuers,

@@ -175,7 +175,8 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   assert.ok((await api.state(owner.token)).computerNotifications.every(item => item.readAt === null));
   async function issue(value: string, id: string) {
     const result = await fetch(`${url}/fts/vouchers`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
-      body: JSON.stringify({ code: value, reports: [{ reportId: id, movieCount: 3, priceCents: 15 }] }) });
+      body: JSON.stringify({ code: value, reports: [{ reportId: id, movieCount: 3, priceCents: 15,
+        items: [{ path: 'Movies/Edited.iso', status: 'modified' }, { path: 'Movies/New.iso', oldPath: 'Movies/Old.iso', status: 'renamed' }] }] }) });
     assert.equal(result.status, 200);
   }
   await issue(code, 'report-1');
@@ -186,6 +187,17 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   assert.equal((await api.state(owner.token)).notifications.length, 1);
   assert.equal((await api.state(avery.token)).notifications.length, 1);
   assert.equal((await api.state(jordan.token)).notifications.length, 0);
+  const credited = await api.state(avery.token);
+  const receiptId = credited.transactions[0].id;
+  const receipt = await api.transactionItems(avery.token, receiptId);
+  assert.equal(receipt?.totalCount, 3);
+  assert.equal(receipt?.omittedCount, 1);
+  assert.deepEqual(receipt?.items.map(item => item.status), ['modified', 'renamed']);
+  assert.equal(receipt?.items[1].oldPath, 'Movies/Old.iso');
+  assert.deepEqual(await api.transactionItems(owner.token, receiptId), receipt);
+  assert.equal(await api.transactionItems(jordan.token, receiptId), null);
+  await api.markRead(avery.token, credited.notifications.map(item => item.id));
+  assert.ok((await api.state(avery.token)).notifications.every(item => item.readAt !== null));
   const allInbox = await api.state(owner.token);
   await api.markRead(owner.token, [...allInbox.notifications, ...allInbox.computerNotifications].map(item => item.id));
   const readInbox = await api.state(owner.token);

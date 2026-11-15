@@ -4,6 +4,7 @@ import { ActivityIndicator, Pressable, View } from 'react-native';
 import { Avatar, Card, Empty, GlassButton, Icon, Notice, Screen, Txt, usePalette } from '@/components/pocket-ui';
 import { money, parseCreditCode, type CreditRedemption, type CreditVoucher, usePocket } from '@/data';
 import SignIn from './sign-in';
+import { PayButton } from '@/components/payment-ui';
 
 export default function Redeem() {
   const { state, serverURL } = usePocket();
@@ -77,7 +78,7 @@ function RedeemCredit({ code }: { code: string }) {
     {voucher && <Card><Txt muted>{voucher.editCount} edits · {voucher.reportCount} {voucher.reportCount === 1 ? 'report' : 'reports'}</Txt><Txt size={44} weight="700" style={{ color: colors.accent }}>{money(voucher.amountCents)}</Txt><Txt muted>{parent ? 'Choose who earned this money.' : saving ? 'Adding to your balance…' : 'These earnings will be added to your balance.'}</Txt></Card>}
     {parent && voucher && <Card><Txt weight="600">Add money to</Txt>{children.length ? children.map(child => <Pressable key={child.id} accessibilityRole="radio" accessibilityState={{ checked: child.id === childId, disabled: saving || attemptChild !== null }} disabled={saving || attemptChild !== null} onPress={() => setChildId(child.id)}><View style={{ flexDirection: 'row', gap: 12, alignItems: 'center', paddingVertical: 6 }}><Avatar id={child.id} name={child.name} size={42} /><View style={{ flex: 1 }}><Txt weight="600">{child.name}</Txt></View>{childId === child.id && <Icon name="check" />}</View></Pressable>) : <Txt muted>Add a child in Family before redeeming this code.</Txt>}</Card>}
     <Notice message={error} />
-    {voucher ? <GlassButton label={saving ? 'Adding earnings' : parent ? `Add ${money(voucher.amountCents)}` : 'Try again'} prominent icon="plus" busy={saving} disabled={parent && !childId} onPress={() => void redeem()} /> : <GlassButton label="Try again" onPress={() => { setLoading(true); setError(null); setReload(value => value + 1); }} />}
+    {voucher ? parent ? <PayButton label={`Pay ${money(voucher.amountCents)}`} status={saving ? 'paying' : 'idle'} disabled={!childId} onPress={() => void redeem()} /> : <GlassButton label={saving ? 'Adding earnings' : 'Try again'} prominent icon="plus" busy={saving} onPress={() => void redeem()} /> : <GlassButton label="Try again" onPress={() => { setLoading(true); setError(null); setReload(value => value + 1); }} />}
     <Txt muted size={13}>Each code can be used once. FTS will show Redeemed when it receives the update.</Txt>
   </Screen>;
 }

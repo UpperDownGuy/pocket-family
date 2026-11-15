@@ -8,7 +8,7 @@ The Python File Tracking System can issue a QR code for earned report credits. A
 2. In Pocket, open **Family → File Tracker**, choose a name and the price per edit, then create a connection. Both parents and kids can create keys. The displayed setup key is **eight digits**, works once, and expires after ten minutes. Keep any leading zero.
 3. In the updated Python FTS folder, run `python -m pip install -r requirements.txt`.
 4. Open FTS **Settings → Connect Pocket**. Enter the family's HTTPS server address and all eight digits. FTS saves the connection automatically; you do not need the setup key again. Use the same per-edit price in FTS Budgeting. Existing connected computers continue working.
-5. Export reports to Excel with budgeting enabled. The **Pocket credits** window opens with a QR. Scan it using **Scan earnings** in Pocket.
+5. Export the **Current report** to Excel with budgeting enabled. This is the default; exporting all reports in a remembered folder requires explicitly choosing **All reports in folder**. Review the source report, date, changed-file count, and amount in **Pocket credits**, then choose **Create QR code**. Scan it using **Scan earnings** in Pocket.
 
 The connection authorizes that computer to issue earnings without approving every export. It can issue and check credits, but cannot read family accounts or spend money. Report counts come from that authorized computer. Kids can view and remove their own connections; parents can manage every family connection. Removing a connection in Pocket cancels its unused codes; previously redeemed money stays in the ledger.
 
@@ -24,6 +24,10 @@ Each report ID is credited at most once per family server, including across diff
 
 The tracker groups up to 50 reports and $10,000 into a code. Redeem the current code before creating another batch. Re-export the folder if needed after restarting FTS; report deduplication prevents another payment for the same work. Keep FTS's saved state so an unclaimed code can be resumed.
 
+The new earnings review uses the same count, rate, deduplication, and batch limits as issuance. A missing or replaced current report stops the export instead of using another folder. Already redeemed credits appear separately as previous credits; exporting or finishing connection setup does not automatically issue a new QR code.
+
+New receipts include a list of the files changed in those reports, with added, removed, modified, and renamed labels. Parents and the recipient child can read the list; siblings cannot. FTS sends relative paths, never file contents or absolute computer paths. Each report carries up to 500 file items and 200 KiB of item metadata. The receipt explicitly counts any omitted details, including older payments that did not record filenames.
+
 ## Server update
 
 If the [one-minute updater](AUTO-UPDATE.md) is installed on WIN-SERVER-1, it will deploy the changed server code after backing up and passing checks. This release adds SQLite tables without removing existing account or ledger data. If the updater has not been installed, follow its installation block on the server first. Do not replace the live checkout with a new clone or discard its local deployment commits.
@@ -37,5 +41,7 @@ QR contents are `pocket://redeem?code=<opaque code>`. They contain no account pa
 Family sessions manage `/fts/issuers`, with owner-only access for kids and family-wide access for parents. Creating an issuer returns its eight-digit `setupCode` and `expiresAt`. FTS exchanges the number through the rate-limited `/fts/pair` endpoint for a persistent connection, using a securely generated credential saved before the request so interrupted setup can be retried. The eight-digit number cannot authorize earnings requests. Existing credentials remain valid.
 
 Scoped tracker credentials access `/fts/connection`, `/fts/vouchers`, and `/fts/vouchers/status`. Family sessions preview and redeem through `/credits/preview` and `/credits/redeem`. Requests use JSON and bearer authentication after pairing. Setup keys, tracker credentials, and QR codes are hashed in the server database; Windows FTS protects its pending setup details, saved credential, and unclaimed code with DPAPI.
+
+An optional `items` array on each voucher report carries relative `path`, change `status`, and optional `oldPath` for a rename. These details are fixed when issued. `GET /transactions/:id/items` reads a redeemed payment's file list under the existing parent/recipient permissions. Updated servers advertise `capabilities.fts.itemLists: true`.
 
 The FTS test suite includes an optional real Python-to-Node integration test. Set `POCKET_TEST_SERVER_DIR` to this repository, then run `python -m unittest discover -s tests` from the FTS folder. It uses a temporary database and local test accounts, never the live family server.

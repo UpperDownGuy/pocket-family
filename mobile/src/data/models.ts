@@ -20,6 +20,14 @@ export interface LedgerTransaction {
   createdAt: string;
 }
 
+export interface ReceiptItem {
+  reportId: string;
+  path: string;
+  status: 'added' | 'removed' | 'modified' | 'renamed';
+  oldPath?: string;
+}
+export interface ReceiptItems { items: ReceiptItem[]; totalCount: number; omittedCount: number }
+
 export interface InboxNotification {
   id: string;
   transactionId: string;
@@ -109,6 +117,7 @@ export interface PocketSnapshot {
   error: string | null;
   setupRequired: boolean;
   signedIn: boolean;
+  pendingTransaction: TransactionInput | null;
 }
 
 export interface PocketActions {
@@ -119,6 +128,7 @@ export interface PocketActions {
   signOut(): Promise<void>;
   addMember(input: MemberInput): Promise<void>;
   recordTransaction(input: TransactionInput): Promise<void>;
+  transactionItems(id: string): Promise<ReceiptItems | null>;
   previewCredit(code: string): Promise<CreditVoucher>;
   redeemCredit(code: string, childId?: string): Promise<CreditRedemption>;
   listFTSIssuers(): Promise<FTSIssuer[]>;

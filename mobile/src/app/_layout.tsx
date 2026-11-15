@@ -4,6 +4,7 @@ import { ActivityIndicator, useColorScheme, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { PocketProvider, usePocket } from '@/data';
 import { usePalette } from '@/components/pocket-ui';
+import { ReceivedPaymentsCard } from '@/components/received-payments';
 
 export const unstable_settings = { anchor: '(tabs)' };
 
@@ -14,7 +15,7 @@ function Navigation() {
   return <Stack screenOptions={{ headerTintColor: colors.accent, headerBackTitle: 'Back', contentStyle: { backgroundColor: colors.background } }}>
     <Stack.Protected guard={!!state} redirectTo="/sign-in">
       <Stack.Screen name="(tabs)" options={{ title: 'Pocket', headerShown: false }} />
-      <Stack.Screen name="entry" options={{ title: 'Add or spend', presentation: 'modal' }} />
+      <Stack.Screen name="entry" options={{ title: 'Pay or record', presentation: 'modal' }} />
       <Stack.Screen name="member" options={{ title: 'Add member', presentation: 'modal' }} />
       <Stack.Screen name="child/[id]" options={{ title: 'Balance' }} />
       <Stack.Screen name="receipt/[id]" options={{ title: 'Details' }} />
@@ -29,5 +30,5 @@ function Navigation() {
 }
 export default function RootLayout() {
   const dark = useColorScheme() === 'dark';
-  return <SafeAreaProvider><ThemeProvider value={dark ? DarkTheme : DefaultTheme}><PocketProvider><StatusBar style={dark ? 'light' : 'dark'} /><Navigation /></PocketProvider></ThemeProvider></SafeAreaProvider>;
+  return <SafeAreaProvider><ThemeProvider value={dark ? DarkTheme : DefaultTheme}><PocketProvider><StatusBar style={dark ? 'light' : 'dark'} /><Navigation /><ReceivedPaymentsCard /></PocketProvider></ThemeProvider></SafeAreaProvider>;
 }

@@ -1,16 +1,21 @@
 import { useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { Avatar, Card, dateLabel, Empty, GlassButton, Icon, Notice, Screen, Section, Txt, usePalette } from '@/components/pocket-ui';
-import { money, usePocket } from '@/data';
+import { money, type ReceiptItems, usePocket } from '@/data';
 
 export default function ReceiptScreen() {
   const { id } = useLocalSearchParams<{ id: string | string[] }>();
   const transactionId = Array.isArray(id) ? id[0] : id;
-  const { state, error, refresh, markRead } = usePocket();
+  const { state, serverURL, error, refresh, markRead, transactionItems } = usePocket();
   const colors = usePalette();
   const [refreshing, setRefreshing] = useState(false);
+  const [files, setFiles] = useState<{ key: string; data: ReceiptItems | null; error: string | null } | null>(null);
+  const [page, setPage] = useState(0);
+  const [revision, setRevision] = useState(0);
   const item = state?.transactions.find(transaction => transaction.id === transactionId);
+  const filesKey = `${serverURL}:${state?.user.id}:${item?.id}:${revision}`;
+  const canRead = !!item;
   const unreadKey = (state?.notifications ?? [])
     .filter(notification => notification.transactionId === transactionId && !notification.readAt)
     .map(notification => notification.id).sort().join(',');
@@ -19,9 +24,21 @@ export default function ReceiptScreen() {
     if (unreadKey) void markRead(unreadKey.split(',')).catch(() => undefined);
   }, [unreadKey, markRead]));
 
+  useFocusEffect(useCallback(() => {
+    if (!canRead || !transactionId) return;
+    let cancelled = false;
+    setFiles(null); setPage(0);
+    void transactionItems(transactionId).then(data => {
+      if (!cancelled) setFiles({ key: filesKey, data, error: null });
+    }).catch(caught => {
+      if (!cancelled) setFiles({ key: filesKey, data: null, error: caught instanceof Error ? caught.message : 'Could not load the file list.' });
+    });
+    return () => { cancelled = true; };
+  }, [transactionId, filesKey, canRead, transactionItems]));
+
   async function reload() {
     setRefreshing(true);
-    try { await refresh(); } finally { setRefreshing(false); }
+    try { await refresh(); setRevision(value => value + 1); } finally { setRefreshing(false); }
   }
 
   if (!item) return (
@@ -34,6 +51,10 @@ export default function ReceiptScreen() {
 
   const addition = item.kind === 'addition';
   const title = item.merchant || (addition ? 'Money added' : 'Purchase');
+  const loaded = files?.key === filesKey ? files : null;
+  const details = loaded?.data;
+  const fileItems = details?.items ?? [];
+  const start = page * 50;
   return (
     <Screen topSafe={false} onRefresh={reload} refreshing={refreshing}>
       {error ? <Notice message={error} /> : null}
@@ -67,6 +88,18 @@ export default function ReceiptScreen() {
         </Card>
       </Section>
       {item.note ? <Section title="Note"><Card style={styles.note}><Txt>{item.note}</Txt></Card></Section> : null}
+      {!loaded ? <ActivityIndicator color={colors.accent} accessibilityLabel="Loading receipt files" /> : loaded.error ? <Notice message={loaded.error} /> : details && details.totalCount > 0 ? <Section title="Changed items">
+        <Card>
+          <Txt size={13} muted>{details.totalCount} {details.totalCount === 1 ? 'item' : 'items'} in this payment</Txt>
+          {fileItems.slice(start, start + 50).map((file, index) => <View key={`${start + index}:${file.reportId}`} style={[styles.file, { borderTopColor: colors.line }]}>
+            <View style={styles.fileHeading}><Icon name="computer" size={18} /><Txt size={12} weight="600" style={{ color: colors.accent }}>{({ added: 'Added', removed: 'Removed', modified: 'Modified', renamed: 'Renamed' })[file.status]}</Txt></View>
+            <Txt size={15} weight="500">{file.path}</Txt>
+            {file.oldPath && <Txt size={12} muted>Previously: {file.oldPath}</Txt>}
+          </View>)}
+          {details.omittedCount > 0 && <Txt size={13} muted>{fileItems.length ? `${details.omittedCount} more items were not included in this receipt.` : 'The file list was not saved with this older payment.'}</Txt>}
+          {fileItems.length > 50 && <><Txt muted size={12}>{start + 1}–{Math.min(start + 50, fileItems.length)} of {fileItems.length}</Txt><View style={styles.paging}><View style={{ flex: 1 }}><GlassButton label="Previous" disabled={page === 0} onPress={() => setPage(value => value - 1)} /></View><View style={{ flex: 1 }}><GlassButton label="Next" disabled={start + 50 >= fileItems.length} onPress={() => setPage(value => value + 1)} /></View></View></>}
+        </Card>
+      </Section> : loaded.data === null && /file tracker|file edits/i.test(item.merchant) ? <Section title="Changed items"><Card><Txt muted size={14}>A file list is not available for this receipt.</Txt></Card></Section> : null}
     </Screen>
   );
 }
@@ -80,4 +113,7 @@ const styles = StyleSheet.create({
   childText: { gap: 4 },
   detailRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 16, borderTopWidth: StyleSheet.hairlineWidth },
   note: { padding: 20 },
+  file: { gap: 5, borderTopWidth: StyleSheet.hairlineWidth, paddingTop: 14 },
+  fileHeading: { flexDirection: 'row', alignItems: 'center', gap: 7 },
+  paging: { flexDirection: 'row', gap: 10 },
 });

@@ -3,6 +3,7 @@ import type { FetchTransport } from './api';
 import type { AuthResponse, MemberInput, PocketActions, PocketSnapshot, SetupInput, TransactionInput } from './models';
 import { DEFAULT_SERVER_URL, MAX_TRANSACTION_CENTS, validateServerURL } from './validation';
 import { parseCreditCode } from './credits';
+import { transactionPayload } from './payments';
 
 export interface SessionStorage {
   getServerURL(): Promise<string | null>;
@@ -21,7 +22,7 @@ class SupersededError extends Error {
 export class PocketController implements PocketActions {
   private snapshot: PocketSnapshot = {
     state: null, serverURL: DEFAULT_SERVER_URL, ready: false, busy: false,
-    error: null, setupRequired: false, signedIn: false,
+    error: null, setupRequired: false, signedIn: false, pendingTransaction: null,
   };
   private readonly listeners = new Set<() => void>();
   private readonly storage: SessionStorage;
@@ -33,6 +34,7 @@ export class PocketController implements PocketActions {
   private operationCount = 0;
   private initialization: Promise<void> | null = null;
   private storageQueue: Promise<unknown> = Promise.resolve();
+  private pendingTransactions = new Map<string, TransactionInput>();
 
   constructor(storage: SessionStorage, transport: FetchTransport) {
     this.storage = storage;
@@ -176,15 +178,40 @@ export class PocketController implements PocketActions {
   };
 
   recordTransaction = async (input: TransactionInput): Promise<void> => {
-    await this.operation(async () => {
+    await this.sessionResult(async session => {
       if (!Number.isSafeInteger(input.amountCents) || input.amountCents <= 0 || input.amountCents > MAX_TRANSACTION_CENTS) {
         throw new Error('Enter an amount between $0.01 and $10,000.00.');
       }
-      const session = this.session();
-      await session.api.recordTransaction(session.token, input);
-      await this.loadState(session);
+      const user = this.snapshot.state?.user;
+      if (!user) throw new Error('Sign in to continue.');
+      const scope = `${session.api.serverURL}\n${user.id}`;
+      const pending = this.pendingTransactions.get(scope);
+      if (pending && transactionPayload(pending) !== transactionPayload(input)) {
+        throw new Error('A previous payment is still unconfirmed. Reopen this form to retry that same payment before starting another.');
+      }
+      const request = { ...(pending ?? input) };
+      this.pendingTransactions.set(scope, request);
+      this.update({ pendingTransaction: request });
+      try { await session.api.recordTransaction(session.token, request); }
+      catch (error) {
+        // Transport failures may follow a committed write. Preserve its exact key
+        // across screen changes; a definitive rejection permits a new request.
+        if (!pending && error instanceof APIError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status)) {
+          this.pendingTransactions.delete(scope);
+          if (this.current(session.generation)) this.update({ pendingTransaction: null });
+        }
+        throw error;
+      }
+      this.pendingTransactions.delete(scope);
+      this.assertSession(session);
+      this.update({ pendingTransaction: null });
+      // A confirmed payment stays successful if only the subsequent refresh fails.
+      try { await this.loadState(session); }
+      catch (error) { this.assertSession(session); await this.handleError(error, session.generation); }
     });
   };
+
+  transactionItems = async (id: string) => this.sessionResult(session => session.api.transactionItems(session.token, id));
 
   markRead = async (ids: string[]): Promise<void> => {
     if (!ids.length) return;
@@ -281,7 +308,7 @@ export class PocketController implements PocketActions {
       const state = await session.api.state(session.token);
       this.assertSession(session);
       if (sequence !== this.stateSequence) return;
-      this.update({ state, error: null });
+      this.update({ state, error: null, pendingTransaction: this.pendingTransactions.get(`${session.api.serverURL}\n${state.user.id}`) ?? null });
     } catch (error) {
       this.assertSession(session);
       if (sequence !== this.stateSequence) return;
@@ -320,7 +347,7 @@ export class PocketController implements PocketActions {
   private beginSessionChange(): number {
     this.generation++;
     this.token = null;
-    this.update({ state: null, signedIn: false, error: null });
+    this.update({ state: null, signedIn: false, error: null, pendingTransaction: null });
     return this.generation;
   }
   private current(expected: number): boolean { return expected === this.generation; }

@@ -1,6 +1,7 @@
 import type { AuthResponse, FamilyState, MemberInput, ServerHealth, SetupInput, TransactionInput } from './models';
 import { parseAuth, parseFamilyState, parseHealth, validateServerURL } from './validation';
 import { FTS_SERVER_UPDATE_MESSAGE, parseCreditCode, parseIssuedKey, parseIssuers, parseRedemption, parseRevokedIssuer, parseVoucher } from './credits';
+import { parseReceiptItems } from './payments';
 
 export class APIError extends Error {
   readonly status: number;
@@ -47,6 +48,15 @@ export class PocketAPI {
   async logout(token: string): Promise<void> { await this.request('/logout', { token, body: {} }); }
   async addMember(token: string, input: MemberInput): Promise<void> { await this.request('/members', { token, body: input }); }
   async recordTransaction(token: string, input: TransactionInput): Promise<void> { await this.request('/transactions', { token, body: input }); }
+  async transactionItems(token: string, id: string) {
+    if (!/^[a-zA-Z0-9-]{1,100}$/.test(id)) throw new Error('Choose a valid receipt.');
+    try { return parseReceiptItems(await this.request(`/transactions/${id}/items`, { token })); }
+    catch (error) {
+      // Older servers have no item route. Inaccessible receipts also reveal no list.
+      if (error instanceof APIError && error.status === 404) return null;
+      throw error;
+    }
+  }
   async markRead(token: string, ids: string[]): Promise<void> { await this.request('/notifications/read', { token, body: { ids } }); }
   async previewCredit(token: string, code: string) { return parseVoucher(await this.request('/credits/preview', { token, body: { code: parseCreditCode(code) } })); }
   async redeemCredit(token: string, code: string, childId?: string) {
