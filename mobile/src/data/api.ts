@@ -1,5 +1,5 @@
 import type { AuthResponse, FamilyRegistrationInput, FamilyState, MemberInput, ServerHealth, SetupInput, TransactionInput } from './models';
-import { FAMILY_UPDATE_MESSAGE, parseAuth, parseFamilyCode, parseFamilyState, parseHealth, validateServerURL } from './validation';
+import { FAMILY_DELETE_UPDATE_MESSAGE, FAMILY_UPDATE_MESSAGE, parseAuth, parseFamilyCode, parseFamilyState, parseHealth, validateServerURL } from './validation';
 import { FTS_SERVER_UPDATE_MESSAGE, parseCreditCode, parseIssuedKey, parseIssuers, parseRedemption, parseRevokedIssuer, parseVoucher } from './credits';
 import { parseReceiptItems } from './payments';
 
@@ -55,6 +55,15 @@ export class PocketAPI {
     }
   }
   async setup(input: SetupInput): Promise<AuthResponse> { return parseAuth(await this.request('/setup', { body: input })); }
+  async deleteFamily(token: string, familyCode: string): Promise<void> {
+    try {
+      const response = await this.request('/family', { token, method: 'DELETE', body: { confirmation: 'DELETE-FAMILY', familyCode: parseFamilyCode(familyCode) } });
+      if (!response || typeof response !== 'object' || !('ok' in response) || response.ok !== true) throw new Error('The server did not confirm family deletion.');
+    } catch (error) {
+      if (error instanceof APIError && [404, 405].includes(error.status)) throw new APIError(409, FAMILY_DELETE_UPDATE_MESSAGE);
+      throw error;
+    }
+  }
   async logout(token: string): Promise<void> { await this.request('/logout', { token, body: {} }); }
   async addMember(token: string, input: MemberInput): Promise<void> { await this.request('/members', { token, body: input }); }
   async recordTransaction(token: string, input: TransactionInput): Promise<void> { await this.request('/transactions', { token, body: input }); }
@@ -98,7 +107,7 @@ export class PocketAPI {
     }
   }
 
-  private async request(path: string, { token, body }: { token?: string; body?: unknown } = {}): Promise<unknown> {
+  private async request(path: string, { token, body, method }: { token?: string; body?: unknown; method?: 'DELETE' } = {}): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20_000);
     const headers: Record<string, string> = { Accept: 'application/json' };
@@ -108,7 +117,7 @@ export class PocketAPI {
       let response: FetchResponse;
       try {
         response = await this.transport(`${this.serverURL}${path}`, {
-          method: body === undefined ? 'GET' : 'POST', headers,
+          method: method ?? (body === undefined ? 'GET' : 'POST'), headers,
           body: body === undefined ? undefined : JSON.stringify(body),
           credentials: 'omit', redirect: 'manual', cache: 'no-store', signal: controller.signal,
         });

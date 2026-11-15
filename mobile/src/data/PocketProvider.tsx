@@ -47,6 +47,7 @@ export function PocketProvider({ children }: PropsWithChildren) {
     changeServer: controller.changeServer,
     signIn: controller.signIn,
     createFamily: controller.createFamily,
+    deleteFamily: controller.deleteFamily,
     setup: controller.setup,
     signOut: controller.signOut,
     addMember: controller.addMember,

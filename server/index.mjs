@@ -76,7 +76,7 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       let output;
       if (route === 'GET /health') output = { setupRequired: registry.setupRequired, pushConfigured: registry.pushConfigured,
         capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true },
-          families: { multiple: true, registration: true } } };
+          families: { multiple: true, registration: true, deletion: true } } };
       else if (route === 'POST /families') {
         limitRegistration(request);
         output = registry.create(await body(request));
@@ -92,34 +92,49 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
         // Tracker keys can issue and poll credits only. They are deliberately
         // not family sessions and cannot inspect accounts or spend money.
         const { store, actor: issuer } = registry.authenticated(request.headers.authorization, true, { allowRevoked: route === 'POST /fts/vouchers/status' });
+        const issuerBody = async (maximumBytes = 16384) => {
+          const input = await body(request, maximumBytes);
+          const current = registry.authenticated(request.headers.authorization, true, { allowRevoked: route === 'POST /fts/vouchers/status' });
+          if (current.store !== store || current.actor.id !== issuer.id) fail(401, 'Reconnect this file tracker before continuing.');
+          return input;
+        };
         if (route === 'GET /fts/connection') output = store.ftsConnection(issuer);
-        else if (route === 'POST /fts/vouchers') output = store.issueFTSVoucher(issuer, await body(request, 512 * 1024));
-        else output = store.ftsVoucherStatus(issuer, await body(request));
+        else if (route === 'POST /fts/vouchers') output = store.issueFTSVoucher(issuer, await issuerBody(512 * 1024));
+        else output = store.ftsVoucherStatus(issuer, await issuerBody());
       } else {
         const { store, family, actor: user } = registry.authenticated(request.headers.authorization);
+        const userBody = async () => {
+          const input = await body(request);
+          // A body may arrive after its family/session was deleted or revoked.
+          // Reauthenticate before using any actor captured before this await.
+          const current = registry.authenticated(request.headers.authorization);
+          if (current.store !== store || current.family.id !== family.id || current.actor.id !== user.id) fail(401, 'Sign in again before continuing.');
+          return input;
+        };
         if (route === 'GET /state') output = registry.withFamily(family, store.state(user));
+        else if (route === 'DELETE /family') output = await registry.deleteFamily(family, store, user, await userBody());
         else if (route === 'POST /logout') { store.logout(user); output = { ok: true }; }
         else if (route === 'POST /members') {
           if (user.role !== 'parent') fail(403, 'Only a parent can add family members.');
-          const member = store.addMember(await body(request));
+          const member = store.addMember(await userBody());
           output = { member: { ...member, balanceCents: 0 } };
         } else if (route === 'POST /transactions') {
-          output = store.createTransaction(user, await body(request));
+          output = store.createTransaction(user, await userBody());
           // Delivery happens after the ledger and inbox transaction has committed.
           void store.drainOutbox().catch(() => {});
         } else if (request.method === 'GET' && /^\/transactions\/[a-f0-9-]{36}\/items$/.test(path)) output = store.transactionItems(user, path.split('/')[2]);
         else if (route === 'GET /fts/issuers') output = store.listFTSIssuers(user);
-        else if (route === 'POST /fts/issuers') output = store.createFTSIssuer(user, await body(request));
+        else if (route === 'POST /fts/issuers') output = store.createFTSIssuer(user, await userBody());
         else if (request.method === 'POST' && /^\/fts\/issuers\/[a-f0-9-]{36}\/revoke$/.test(path)) output = store.revokeFTSIssuer(user, path.split('/')[3]);
-        else if (route === 'POST /credits/preview') output = store.previewCredit(user, await body(request));
+        else if (route === 'POST /credits/preview') output = store.previewCredit(user, await userBody());
         else if (route === 'POST /credits/redeem') {
-          output = store.redeemCredit(user, await body(request));
+          output = store.redeemCredit(user, await userBody());
           void store.drainOutbox().catch(() => {});
         } else if (route === 'POST /browser/purchase') {
-          output = store.browserPurchase(user, await body(request));
+          output = store.browserPurchase(user, await userBody());
           void store.drainOutbox().catch(() => {});
-        } else if (route === 'POST /notifications/read') { store.markRead(user, await body(request)); output = { ok: true }; }
-        else if (route === 'POST /devices' || route === 'DELETE /devices') { registry.device(store, user, await body(request), request.method === 'DELETE'); output = { ok: true }; }
+        } else if (route === 'POST /notifications/read') { store.markRead(user, await userBody()); output = { ok: true }; }
+        else if (route === 'POST /devices' || route === 'DELETE /devices') { registry.device(store, user, await userBody(), request.method === 'DELETE'); output = { ok: true }; }
         else fail(404, 'Not found.');
       }
       response.writeHead(200);

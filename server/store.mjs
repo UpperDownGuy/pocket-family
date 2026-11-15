@@ -69,6 +69,7 @@ export class FamilyStore {
     this.draining = false;
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS family_lifecycle (key TEXT PRIMARY KEY,value TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS members (id TEXT PRIMARY KEY,name TEXT NOT NULL,username TEXT NOT NULL UNIQUE,
         role TEXT NOT NULL CHECK(role IN ('parent','child')),salt TEXT NOT NULL,password_hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES members(id),expires_at INTEGER NOT NULL);
@@ -116,6 +117,17 @@ export class FamilyStore {
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
   get setupRequired() { return !this.db.prepare("SELECT value FROM settings WHERE key='familyName'").get(); }
+  get deletedAt() { return this.db.prepare("SELECT value FROM family_lifecycle WHERE key='deleted_at'").get()?.value ?? null; }
+  clearFamily(deletedAt) {
+    this.atomic(() => {
+      // Foreign-key order preserves atomic removal of all active family data.
+      for (const table of ['outbox', 'notifications', 'fts_event_notifications', 'fts_events', 'fts_report_items',
+        'fts_reports', 'fts_vouchers', 'fts_pairings', 'fts_issuers', 'devices', 'transactions', 'sessions', 'members', 'settings']) {
+        this.db.exec(`DELETE FROM ${table}`);
+      }
+      this.db.prepare("INSERT INTO family_lifecycle VALUES ('deleted_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(deletedAt);
+    });
+  }
   get familyName() { return this.db.prepare("SELECT value FROM settings WHERE key='familyName'").get()?.value ?? ''; }
   get pushConfigured() { return Boolean(this.pushProvider); }
   addMember(input) {
@@ -460,11 +472,12 @@ export class FamilyStore {
     });
   }
   async drainOutbox() {
-    if (!this.pushProvider || this.draining) return;
+    if (!this.pushProvider || this.draining || this.deleting || this.deletedAt) return;
     this.draining = true;
     try {
       const entries = this.db.prepare("SELECT * FROM outbox WHERE status='pending' AND next_attempt<=? ORDER BY rowid LIMIT 20").all(Date.now());
       for (const entry of entries) {
+        if (this.deleting || this.deletedAt) break;
         const device = this.db.prepare('SELECT d.token FROM devices d JOIN sessions s ON s.hash=d.session_hash WHERE d.token=? AND d.user_id=? AND s.expires_at>?').get(entry.device_token, entry.recipient_id, Date.now());
         if (!device) { this.db.prepare("UPDATE outbox SET status='cancelled' WHERE id=?").run(entry.id); continue; }
         let result;
@@ -496,25 +509,41 @@ export class FamilyRegistry {
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS families (id TEXT PRIMARY KEY,family_code TEXT NOT NULL UNIQUE,
         db_path TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,is_legacy INTEGER NOT NULL CHECK(is_legacy IN (0,1)));
+      CREATE TABLE IF NOT EXISTS deleted_families (family_id TEXT PRIMARY KEY,family_code TEXT NOT NULL UNIQUE,
+        db_path TEXT NOT NULL UNIQUE,is_legacy INTEGER NOT NULL CHECK(is_legacy IN (0,1)),deleted_at TEXT NOT NULL,cleared_at TEXT);
       CREATE UNIQUE INDEX IF NOT EXISTS one_legacy_family ON families(is_legacy) WHERE is_legacy=1;`);
     try {
-      const families = this.list();
+      const activeRows = this.db.prepare('SELECT * FROM families').all();
+      const tombstones = this.db.prepare('SELECT *,family_id AS id FROM deleted_families').all();
+      const deleted = new Map(tombstones.map(row => [row.id, row]));
+      const families = [...new Map([...activeRows, ...tombstones].map(row => [row.id, row])).values()];
       for (const family of families) {
         if (!uuid.test(family.id) || (family.is_legacy ? family.db_path !== this.dbPath
           : this.familyDirectory === null || family.db_path !== join(this.familyDirectory, family.id + '.sqlite'))) {
           throw new Error('The family registry contains an unexpected database path.');
         }
-        if (!existsSync(family.db_path)) throw new Error('A registered family database is missing. Restore its backup before starting Pocket.');
+        if (!existsSync(family.db_path) && !deleted.get(family.id)?.cleared_at) throw new Error('A registered family database is missing. Restore its backup before starting Pocket.');
       }
       this.legacyStore = new FamilyStore(this.dbPath, options);
       this.configureStore(this.legacyStore);
       for (const family of families) {
+        // Completed tombstones need no account database when restoring an old
+        // backup that omitted the retained empty file.
+        if (!family.is_legacy && !existsSync(family.db_path) && deleted.get(family.id)?.cleared_at) continue;
         const store = family.is_legacy ? this.legacyStore : new FamilyStore(family.db_path, options);
         this.stores.set(family.id, store);
+        if (deleted.has(family.id) || store.deletedAt) {
+          store.deleting = true;
+          const deletedAt = deleted.get(family.id)?.deleted_at ?? store.deletedAt;
+          this.markDeleted(family, deletedAt);
+          store.clearFamily(deletedAt);
+          this.finishDeletion(family.id);
+          continue;
+        }
         if (store.setupRequired) throw new Error('A registered family database is empty. Restore its backup before starting Pocket.');
         this.configureStore(store);
       }
-      if (!this.legacyStore.setupRequired && !families.some(family => family.is_legacy)) {
+      if (!this.legacyStore.setupRequired && !this.legacyStore.deletedAt && !families.some(family => family.is_legacy)) {
         this.register(this.legacyStore, this.dbPath, true);
       }
     } catch (error) {
@@ -523,7 +552,7 @@ export class FamilyRegistry {
       throw error;
     }
   }
-  list() { return this.db.prepare('SELECT * FROM families ORDER BY created_at,id').all(); }
+  list() { return this.db.prepare('SELECT f.* FROM families f WHERE NOT EXISTS (SELECT 1 FROM deleted_families d WHERE d.family_id=f.id) ORDER BY f.created_at,f.id').all(); }
   get setupRequired() { return this.list().length === 0; }
   get pushConfigured() { return this.legacyStore.pushConfigured; }
   allStores() { return [...new Set([this.legacyStore, ...this.stores.values()])]; }
@@ -535,7 +564,7 @@ export class FamilyRegistry {
     let familyCode;
     for (let attempt = 0; attempt < 32; attempt++) {
       const candidate = this.generateFamilyCode();
-      if (!this.db.prepare('SELECT 1 FROM families WHERE family_code=?').get(candidate)) { familyCode = candidate; break; }
+      if (!this.db.prepare('SELECT 1 FROM families WHERE family_code=? UNION ALL SELECT 1 FROM deleted_families WHERE family_code=?').get(candidate, candidate)) { familyCode = candidate; break; }
     }
     if (familyCode === undefined) fail(503, 'Could not create a family code. Try again.');
     return familyCode;
@@ -549,6 +578,11 @@ export class FamilyRegistry {
   withFamily(family, result) { return { ...result, familyCode: family.family_code }; }
   setup(input) {
     if (!this.setupRequired) fail(409, 'A family is already set up. Use Create a family for a separate family.');
+    // Keep legacy setup usable after deletion without reusing a deleted store.
+    if (this.legacyStore.deletedAt) {
+      if (typeof input.setupCode !== 'string' || !timingSafeEqual(Buffer.from(hash(input.setupCode)), Buffer.from(hash(this.legacyStore.setupCode)))) fail(403, 'Incorrect setup code.');
+      return this.create(input);
+    }
     const familyCode = this.availableFamilyCode();
     const result = this.legacyStore.setup(input);
     const family = this.register(this.legacyStore, this.dbPath, true, randomUUID(), familyCode);
@@ -584,7 +618,9 @@ export class FamilyRegistry {
       family = families.find(candidate => candidate.is_legacy) ?? (families.length === 1 ? families[0] : undefined);
       if (!family) fail(400, families.length ? 'Enter your family code to sign in.' : 'Create a family to get started.');
     }
-    return this.withFamily(family, this.stores.get(family.id).login(input));
+    const store = this.stores.get(family.id);
+    this.assertAvailable(store);
+    return this.withFamily(family, store.login(input));
   }
   authenticated(header, tracker = false, options = {}) {
     const pattern = tracker ? /^Bearer fts_[A-Za-z0-9_-]{43}$/ : /^Bearer [A-Za-z0-9_-]{43}$/;
@@ -595,6 +631,7 @@ export class FamilyRegistry {
     if (matches.length !== 1) fail(401, tracker ? 'The file tracker key is invalid. Reconnect it in Pocket.' : 'Your session has expired. Sign in again.');
     const family = matches[0];
     const store = this.stores.get(family.id);
+    this.assertAvailable(store);
     const actor = tracker ? store.authenticateFTSIssuer(header, options) : store.authenticate(header);
     return { family, store, actor };
   }
@@ -605,6 +642,7 @@ export class FamilyRegistry {
     const matches = [...this.stores.values()].filter(store => store.db.prepare('SELECT 1 FROM fts_pairings WHERE code_hash=?').get(codeHash));
     if (matches.length !== 1) fail(400, 'That setup code is invalid. Generate a new one in Pocket.');
     const store = matches[0];
+    this.assertAvailable(store);
     const credentialHash = hash(input.credential);
     if (this.allStores().some(other => other !== store && other.db.prepare('SELECT 1 FROM fts_issuers WHERE token_hash=?').get(credentialHash))) {
       fail(409, 'Use a fresh FTS connection credential for this setup code.');
@@ -619,6 +657,43 @@ export class FamilyRegistry {
       other.db.prepare('DELETE FROM devices WHERE token=?').run(token);
     });
     store.device(user, input, remove);
+  }
+  assertAvailable(store) {
+    if (!store || store.deleting || store.deletedAt) fail(401, 'This family is no longer available. Sign in to another family.');
+  }
+  markDeleted(family, deletedAt) {
+    this.db.prepare('INSERT INTO deleted_families VALUES (?,?,?,?,?,NULL) ON CONFLICT(family_id) DO NOTHING')
+      .run(family.id, family.family_code, family.db_path, family.is_legacy, deletedAt);
+  }
+  finishDeletion(id) {
+    this.db.exec('BEGIN IMMEDIATE');
+    try {
+      this.db.prepare('DELETE FROM families WHERE id=?').run(id);
+      this.db.prepare('UPDATE deleted_families SET cleared_at=COALESCE(cleared_at,?) WHERE family_id=?').run(new Date().toISOString(), id);
+      this.db.exec('COMMIT');
+    } catch (error) { this.db.exec('ROLLBACK'); throw error; }
+  }
+  async deleteFamily(family, store, user, input) {
+    if (user.role !== 'parent') fail(403, 'Only a parent can delete this family.');
+    if (input.confirmation !== 'DELETE-FAMILY') fail(400, 'Confirm that you want to delete this family.');
+    if (input.familyCode !== family.family_code) fail(409, 'The family changed. Reopen settings before deleting it.');
+    this.assertAvailable(store);
+    store.deleting = true;
+    try {
+      // Stop new batches and let an already-sent generic push finish before
+      // clearing its rows. No suspended delivery may write after the clear.
+      while (store.draining) await new Promise(resolve => setTimeout(resolve, 10));
+      const deletedAt = new Date().toISOString();
+      this.markDeleted(family, deletedAt);
+      store.clearFamily(deletedAt);
+      this.finishDeletion(family.id);
+      return { ok: true };
+    } catch (error) {
+      // Once durable intent exists, keep access blocked; startup completes
+      // interrupted deletion. A pre-commit failure leaves the family usable.
+      if (!this.db.prepare('SELECT 1 FROM deleted_families WHERE family_id=?').get(family.id)) store.deleting = false;
+      throw error;
+    }
   }
   async drainOutbox() { await Promise.all(this.allStores().map(store => store.drainOutbox())); }
   close() { for (const store of this.allStores()) store.close(); this.db.close(); }

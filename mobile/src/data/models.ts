@@ -70,11 +70,13 @@ export interface ServerHealth {
   pushConfigured: boolean;
   capabilities?: {
     fts?: { setupCodeDigits: number; childCanConnect: boolean; parentComputerLog: boolean };
-    families?: { multiple: boolean; registration: boolean };
+    families?: { multiple: boolean; registration: boolean; deletion?: boolean };
   };
 }
 
 export interface FamilyRegistrationInput { familyName: string; name: string; username: string; password: string }
+/** Captured when the parent opens the confirmation, so it cannot target another sign-in. */
+export interface FamilyDeletionContext { familyCode: string; serverURL: string; userId: string }
 
 export interface SetupInput {
   familyName: string;
@@ -135,6 +137,7 @@ export interface PocketActions {
   changeServer(url: string): Promise<void>;
   signIn(username: string, password: string, familyCode?: string): Promise<void>;
   createFamily(input: FamilyRegistrationInput): Promise<void>;
+  deleteFamily(context: FamilyDeletionContext): Promise<void>;
   setup(input: SetupInput): Promise<void>;
   signOut(): Promise<void>;
   addMember(input: MemberInput): Promise<void>;

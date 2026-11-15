@@ -48,18 +48,34 @@ export function backupFamilies(dbPath) {
     return target;
   };
   const registryPath = dbPath + '.families.sqlite';
-  // Snapshot membership first. The API never deletes family stores; all stores
-  // referenced by this registry snapshot therefore remain available to copy.
+  const hasTombstones = db => Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='deleted_families'").get());
+  let registryCopy;
+  const capturedFamilies = new Map();
+  // Snapshot membership first. Family deletion retains each SQLite file and
+  // records a tombstone before clearing it, so every captured path still exists.
   if (existsSync(registryPath)) {
-    const registryCopy = snapshot(registryPath);
+    registryCopy = snapshot(registryPath);
     const registry = new DatabaseSync(registryCopy, { readOnly: true });
     try {
-      for (const family of registry.prepare('SELECT id,db_path,is_legacy FROM families').all()) {
+      const families = registry.prepare('SELECT id,db_path,is_legacy FROM families').all();
+      if (hasTombstones(registry)) families.push(...registry.prepare('SELECT family_id AS id,db_path,is_legacy,cleared_at FROM deleted_families').all());
+      for (const family of families) {
         if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(family.id) || ![0, 1].includes(family.is_legacy)) {
           throw new Error('Invalid family registry.');
         }
         const expected = family.is_legacy ? dbPath : join(dbPath + '.families', family.id + '.sqlite');
         if (family.db_path !== expected) throw new Error('Family database is outside the configured storage layout.');
+        const previous = capturedFamilies.get(family.id);
+        if (previous && (previous.db_path !== expected || previous.is_legacy !== family.is_legacy)) throw new Error('Conflicting family tombstone path.');
+        if (previous) { previous.cleared_at ||= family.cleared_at; continue; }
+        capturedFamilies.set(family.id, { ...family });
+      }
+      for (const family of capturedFamilies.values()) {
+        const expected = family.db_path;
+        // Older backups can omit already-cleared files. Preserve their
+        // completed tombstones without inventing a pending, missing database.
+        if (!existsSync(expected) && family.cleared_at) { family.missingCompleted = true; continue; }
+        ordinary(expected);
         if (!family.is_legacy) {
           ordinary(dirname(expected), true);
           snapshot(expected);
@@ -68,6 +84,48 @@ export function backupFamilies(dbPath) {
     } finally { registry.close(); }
   }
   if (existsSync(dbPath)) snapshot(dbPath);
+  if (registryCopy) {
+    // A deletion can begin after the registry snapshot and clear a database
+    // before its later snapshot. Reconcile those tombstones into the copy so
+    // restore cannot mistake an intentionally cleared family for corruption.
+    ordinary(registryPath);
+    const liveRegistry = new DatabaseSync(registryPath, { readOnly: true });
+    let tombstones;
+    try {
+      liveRegistry.exec('PRAGMA busy_timeout=10000;');
+      tombstones = hasTombstones(liveRegistry) ? liveRegistry.prepare('SELECT * FROM deleted_families').all() : [];
+    } finally { liveRegistry.close(); }
+    const registry = new DatabaseSync(registryCopy);
+    try {
+      const capturedTombstones = tombstones.filter(row => capturedFamilies.has(row.family_id));
+      if (capturedTombstones.length || hasTombstones(registry)) {
+        registry.exec(`CREATE TABLE IF NOT EXISTS deleted_families (
+          family_id TEXT PRIMARY KEY,family_code TEXT NOT NULL UNIQUE,db_path TEXT NOT NULL UNIQUE,
+          is_legacy INTEGER NOT NULL,deleted_at TEXT NOT NULL,cleared_at TEXT); BEGIN IMMEDIATE;`);
+        try {
+          for (const row of capturedTombstones) {
+            const family = capturedFamilies.get(row.family_id);
+            if (row.db_path !== family.db_path || row.is_legacy !== family.is_legacy || typeof row.deleted_at !== 'string' || !row.deleted_at) {
+              throw new Error('Invalid family tombstone in the live registry.');
+            }
+            registry.prepare(`INSERT INTO deleted_families (family_id,family_code,db_path,is_legacy,deleted_at,cleared_at)
+              VALUES (?,?,?,?,?,?) ON CONFLICT(family_id) DO UPDATE SET deleted_at=excluded.deleted_at,cleared_at=excluded.cleared_at`)
+              .run(row.family_id, row.family_code, row.db_path, row.is_legacy, row.deleted_at, family.missingCompleted ? family.cleared_at : null);
+            registry.prepare('DELETE FROM families WHERE id=?').run(row.family_id);
+          }
+          // A family snapshot can predate its completed clear. Re-run deletion
+          // on restore rather than trusting the live completion timestamp.
+          for (const family of capturedFamilies.values()) {
+            if (!family.missingCompleted) registry.prepare('UPDATE deleted_families SET cleared_at=NULL WHERE family_id=?').run(family.id);
+          }
+          registry.exec('COMMIT;');
+        } catch (error) { registry.exec('ROLLBACK;'); throw error; }
+      }
+      if (registry.prepare('PRAGMA integrity_check').get().integrity_check !== 'ok') throw new Error('Reconciled registry integrity check failed.');
+    } finally { registry.close(); }
+    const entry = files.find(file => file.path === relative(root, registryPath));
+    entry.sha256 = createHash('sha256').update(readFileSync(registryCopy)).digest('hex');
+  }
   if (files.length === 0) throw new Error('No Pocket databases were found to back up.');
   writeFileSync(join(destination, 'manifest.json'), JSON.stringify({ version: 1, dbPath, createdAt: new Date().toISOString(), files }, null, 2), { flag: 'wx', mode: 0o600 });
   return { backupDirectory: destination, databases: files.length };

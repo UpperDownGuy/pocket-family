@@ -4,6 +4,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, rm, readdir, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { request as httpRequest } from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
 import { createFamilyServer } from '../index.mjs';
 import { FamilyStore } from '../store.mjs';
 import { resetFamilies, RESET_CONFIRMATION } from '../reset-families.mjs';
@@ -72,7 +74,7 @@ test('public registration creates separate stable family codes and supports reus
   assert.notEqual(first.user.id, second.user.id);
   const health = await f.request('GET', '/health');
   assert.equal(health.setupRequired, false);
-  assert.deepEqual(health.capabilities.families, { multiple: true, registration: true });
+  assert.deepEqual(health.capabilities.families, { multiple: true, registration: true, deletion: true });
   assert.equal(JSON.stringify(health).includes(first.familyCode), false);
   assert.equal((await f.request('POST', '/setup', { ...signup('Forbidden legacy'), setupCode: 'legacy-setup' })).status, 409);
   assert.equal((await f.request('POST', '/login', { username: 'parent', password })).status, 400);
@@ -305,4 +307,176 @@ test('offline reset of real API-created families invalidates every old session a
   assert.equal(state.members[0].balanceCents, 0);
   assert.equal((await f.request('GET', '/health')).setupRequired, false);
   assert.equal((await f.request('POST', '/credits/preview', { code: originals[0].code }, fresh.token)).status, 404);
+});
+
+test('only a current-family parent with matching confirmation can delete its data; other families and files survive restart', async t => {
+  const f = await fixture(t);
+  const a = await f.create('Delete Alpha');
+  const b = await f.create('Keep Beta');
+  const ac = await f.child(a);
+  const bc = await f.child(b);
+  await f.credit(a, ac);
+  await f.credit(b, bc);
+  const issuer = await f.issuer(ac);
+  const credential = 'fts_' + randomCode();
+  await f.request('POST', '/fts/pair', { setupCode: issuer.setupCode, credential });
+  const code = randomCode();
+  await f.request('POST', '/fts/vouchers', { code, reports: [{ reportId: 'to-delete', movieCount: 1, priceCents: 15,
+    items: [{ path: 'private.txt', status: 'modified' }] }] }, credential);
+  await f.request('POST', '/credits/redeem', { code }, ac.token);
+  const beforeB = await f.state(b);
+  const store = f.store(a);
+  const family = f.app.registry.authenticated(`Bearer ${a.token}`).family;
+  const confirmation = { confirmation: 'DELETE-FAMILY', familyCode: a.familyCode };
+  assert.equal((await f.request('DELETE', '/family', confirmation)).status, 401);
+  assert.equal((await f.request('DELETE', '/family', confirmation, ac.token)).status, 403);
+  for (const bad of [{}, { familyCode: a.familyCode }, { ...confirmation, confirmation: 'delete-family' }]) {
+    assert.equal((await f.request('DELETE', '/family', bad, a.token)).status, 400);
+  }
+  for (const familyCode of [undefined, '', 12345678, b.familyCode]) {
+    assert.equal((await f.request('DELETE', '/family', { ...confirmation, familyCode }, a.token)).status, 409);
+  }
+  const result = await f.request('DELETE', '/family', { ...confirmation, familyId: f.app.registry.authenticated(`Bearer ${b.token}`).family.id }, a.token);
+  assert.deepEqual(result, { status: 200, ok: true });
+  for (const table of ['members', 'sessions', 'transactions', 'notifications', 'devices', 'outbox', 'settings',
+    'fts_issuers', 'fts_pairings', 'fts_vouchers', 'fts_reports', 'fts_report_items', 'fts_events', 'fts_event_notifications']) {
+    assert.equal(store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0, table);
+  }
+  assert.ok(store.deletedAt);
+  assert.ok(f.app.registry.db.prepare('SELECT cleared_at FROM deleted_families WHERE family_id=?').get(family.id).cleared_at);
+  assert.equal(f.app.registry.db.prepare('SELECT id FROM families WHERE id=?').get(family.id), undefined);
+  assert.ok((await readdir(f.dbPath + '.families')).includes(family.id + '.sqlite'));
+  assert.deepEqual(await f.state(b), beforeB);
+  for (const who of [a, ac]) assert.equal((await f.state(who)).status, 401);
+  assert.equal((await f.request('GET', '/fts/connection', undefined, credential)).status, 401);
+  assert.equal((await f.request('POST', '/fts/pair', { setupCode: issuer.setupCode, credential })).status, 400);
+  await f.reopen();
+  assert.equal((await f.state(a)).status, 401);
+  assert.deepEqual(await f.state(b), beforeB);
+  assert.equal(f.app.registry.list().length, 1);
+  assert.equal((await f.request('GET', '/health')).setupRequired, false);
+});
+
+test('deleting the legacy family never resurrects it, and an empty server can create another family', async t => {
+  const f = await fixture(t);
+  const legacy = await f.request('POST', '/setup', { ...signup('Legacy'), setupCode: 'legacy-setup' });
+  assert.equal(legacy.status, 200);
+  const child = await f.child(legacy);
+  await f.credit(legacy, child);
+  assert.equal((await f.request('DELETE', '/family', { confirmation: 'DELETE-FAMILY', familyCode: legacy.familyCode }, legacy.token)).status, 200);
+  assert.equal(f.app.store.setupRequired, true);
+  assert.ok(f.app.store.deletedAt);
+  await f.reopen();
+  assert.deepEqual(f.app.registry.list(), []);
+  assert.equal((await f.request('GET', '/health')).setupRequired, true);
+  assert.equal((await f.state(legacy)).status, 401);
+  assert.equal((await f.request('POST', '/login', { username: 'parent', password, familyCode: legacy.familyCode })).status, 401);
+  const fresh = await f.request('POST', '/setup', { ...signup('Fresh after deletion'), setupCode: 'different-legacy-setup' });
+  assert.equal(fresh.status, 200);
+  assert.notEqual(fresh.familyCode, legacy.familyCode);
+  assert.deepEqual((await f.state(fresh)).transactions, []);
+  assert.notEqual(f.app.registry.authenticated(`Bearer ${fresh.token}`).store, f.app.store);
+  await f.reopen();
+  assert.equal((await f.state(fresh)).familyName, 'Fresh after deletion');
+  assert.equal((await f.state(legacy)).status, 401);
+});
+
+test('requests with bodies arriving after deletion reauthenticate and cannot recreate members or FTS data', async t => {
+  const f = await fixture(t);
+  const parent = await f.create('Delayed');
+  const issuer = await f.issuer(parent);
+  const credential = 'fts_' + randomCode();
+  await f.request('POST', '/fts/pair', { setupCode: issuer.setupCode, credential });
+  const store = f.store(parent);
+  async function delayed(path, input, token) {
+    const payload = Buffer.from(JSON.stringify(input));
+    let sawAuthentication;
+    const authenticated = new Promise(resolve => { sawAuthentication = resolve; });
+    const original = f.app.registry.authenticated;
+    f.app.registry.authenticated = function (header, ...args) {
+      const result = original.call(this, header, ...args);
+      if (header === `Bearer ${token}`) sawAuthentication();
+      return result;
+    };
+    let pending;
+    const response = new Promise((resolve, reject) => {
+      pending = httpRequest({ hostname: '127.0.0.1', port: f.app.server.address().port, path, method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json', 'content-length': payload.length } }, result => {
+        const chunks = [];
+        result.on('data', chunk => chunks.push(chunk));
+        result.on('end', () => resolve({ status: result.statusCode, ...JSON.parse(Buffer.concat(chunks).toString()) }));
+      });
+      pending.on('error', reject);
+      pending.setTimeout(3000, () => pending.destroy(new Error('Delayed request timed out')));
+      pending.write(payload.subarray(0, 1));
+    });
+    await authenticated;
+    f.app.registry.authenticated = original;
+    return { finish: () => pending.end(payload.subarray(1)), response };
+  }
+  const memberRequest = await delayed('/members', { name: 'Late child', username: 'latechild', password, role: 'child' }, parent.token);
+  const voucherRequest = await delayed('/fts/vouchers', { code: randomCode(), reports: [{ reportId: 'late', movieCount: 1, priceCents: 15 }] }, credential);
+  assert.equal((await f.request('DELETE', '/family', { confirmation: 'DELETE-FAMILY', familyCode: parent.familyCode }, parent.token)).status, 200);
+  memberRequest.finish(); voucherRequest.finish();
+  assert.equal((await memberRequest.response).status, 401);
+  assert.equal((await voucherRequest.response).status, 401);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM members').get().count, 0);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM fts_vouchers').get().count, 0);
+});
+
+test('deletion waits for one in-flight push and suppresses the rest of its captured batch', async t => {
+  let release;
+  let started;
+  const ready = new Promise(resolve => { started = resolve; });
+  const held = new Promise(resolve => { release = resolve; });
+  const sent = [];
+  const f = await fixture(t, { pushProvider: { send: async token => { sent.push(token); started(); await held; return { ok: true }; } } });
+  const parent = await f.create('Push deletion');
+  const child = await f.child(parent);
+  const store = f.store(parent);
+  await f.request('POST', '/devices', { token: 'a'.repeat(64) }, parent.token);
+  await f.request('POST', '/devices', { token: 'b'.repeat(64) }, child.token);
+  await f.credit(parent, child);
+  await ready;
+  const deletion = f.request('DELETE', '/family', { confirmation: 'DELETE-FAMILY', familyCode: parent.familyCode }, parent.token);
+  while (!store.deleting) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.equal((await f.state(parent)).status, 401);
+  release();
+  assert.equal((await deletion).status, 200);
+  assert.equal(sent.length, 1);
+  assert.equal(store.draining, false);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM outbox').get().count, 0);
+  await f.app.registry.drainOutbox();
+  assert.equal(sent.length, 1);
+});
+
+test('startup completes a durable deletion interrupted before clear and reconciles an old registry with a cleared family snapshot', async t => {
+  const f = await fixture(t);
+  const pending = await f.create('Interrupted');
+  const overlap = await f.create('Backup overlap');
+  const keep = await f.create('Keep');
+  const pendingFamily = f.app.registry.authenticated(`Bearer ${pending.token}`).family;
+  const overlapFamily = f.app.registry.authenticated(`Bearer ${overlap.token}`).family;
+  const pendingStore = f.store(pending);
+  const originalClear = pendingStore.clearFamily;
+  pendingStore.clearFamily = () => { throw new Error('Fixture interrupted clear'); };
+  assert.equal((await f.request('DELETE', '/family', { confirmation: 'DELETE-FAMILY', familyCode: pending.familyCode }, pending.token)).status, 500);
+  pendingStore.clearFamily = originalClear;
+  assert.equal((await f.state(pending)).status, 401);
+  assert.equal(pendingStore.db.prepare('SELECT COUNT(*) AS count FROM members').get().count, 1);
+  // This is the exact state a registry-first backup can restore: an active
+  // registry row from before deletion, plus the later atomic cleared DB.
+  f.store(overlap).clearFamily(new Date().toISOString());
+  assert.equal(f.app.registry.db.prepare('SELECT family_id FROM deleted_families WHERE family_id=?').get(overlapFamily.id), undefined);
+  await f.reopen();
+  assert.deepEqual(f.app.registry.list().map(row => row.family_code), [keep.familyCode]);
+  for (const auth of [pending, overlap]) assert.equal((await f.state(auth)).status, 401);
+  for (const family of [pendingFamily, overlapFamily]) {
+    const tombstone = f.app.registry.db.prepare('SELECT * FROM deleted_families WHERE family_id=?').get(family.id);
+    assert.ok(tombstone.cleared_at);
+    const database = new DatabaseSync(family.db_path, { readOnly: true });
+    try { assert.equal(database.prepare('SELECT COUNT(*) AS count FROM members').get().count, 0); }
+    finally { database.close(); }
+  }
+  assert.equal((await f.state(keep)).familyName, 'Keep');
 });

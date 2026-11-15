@@ -1,7 +1,7 @@
 import { APIError, PocketAPI } from './api';
 import type { FetchTransport } from './api';
-import type { AuthResponse, FamilyRegistrationInput, MemberInput, PocketActions, PocketSnapshot, SetupInput, TransactionInput } from './models';
-import { DEFAULT_SERVER_URL, FAMILY_UPDATE_MESSAGE, MAX_TRANSACTION_CENTS, parseFamilyCode, validateServerURL } from './validation';
+import type { AuthResponse, FamilyDeletionContext, FamilyRegistrationInput, MemberInput, PocketActions, PocketSnapshot, SetupInput, TransactionInput } from './models';
+import { DEFAULT_SERVER_URL, FAMILY_DELETE_UPDATE_MESSAGE, FAMILY_UPDATE_MESSAGE, MAX_TRANSACTION_CENTS, parseFamilyCode, validateServerURL } from './validation';
 import { parseCreditCode } from './credits';
 import { transactionPayload } from './payments';
 
@@ -162,6 +162,37 @@ export class PocketController implements PocketActions {
         }
       }
     }, expected);
+  };
+
+  deleteFamily = async (context: FamilyDeletionContext): Promise<void> => {
+    const session = this.session();
+    await this.operation(async () => {
+      const family = this.snapshot.state;
+      if (family?.user.role !== 'parent') throw new Error('Only a parent can delete the family.');
+      if (context.serverURL !== session.api.serverURL || context.userId !== family.user.id || context.familyCode !== family.familyCode) {
+        throw new Error('Your family or account changed. Open the deletion confirmation again.');
+      }
+      const code = parseFamilyCode(context.familyCode);
+      const health = await session.api.health();
+      this.assertSession(session);
+      if (health.capabilities?.families?.deletion !== true) throw new Error(FAMILY_DELETE_UPDATE_MESSAGE);
+      await session.api.deleteFamily(session.token, code);
+
+      // Clear only this family's cached retry state, even if another account has
+      // signed in while the server was deleting it. Never sign that account out.
+      for (const member of family.members) this.pendingTransactions.delete(`${session.api.serverURL}\n${member.id}`);
+      if (this.familyCodes.get(session.api.serverURL) === code) this.familyCodes.delete(session.api.serverURL);
+      this.assertSession(session);
+      const clearedGeneration = this.beginSessionChange();
+      this.update({ familyCodeHint: '' });
+      try {
+        await this.queueStorage(async () => {
+          if (await this.storage.getToken(session.api.serverURL) === session.token) await this.storage.removeToken(session.api.serverURL);
+        });
+      } catch {
+        if (this.current(clearedGeneration)) this.update({ error: 'Your family was deleted. Its expired saved sign-in could not be removed from this device.' });
+      }
+    }, session.generation);
   };
 
   changeServer = async (value: string): Promise<void> => {

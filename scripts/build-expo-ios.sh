@@ -60,6 +60,24 @@ test -d node_modules/expo
 # This is CNG: the config plugin creates PocketSafari from the shared native sources.
 npx --no-install expo prebuild --platform ios --no-install --skip-dependency-update react,react-native \
   2>&1 | tee "$DIAGNOSTICS/prebuild.log"
+python3 - <<'PY' | tee "$DIAGNOSTICS/icon-appearances.txt"
+from pathlib import Path
+import json, struct
+catalog = Path('ios/Pocket/Images.xcassets/AppIcon.appiconset')
+entries = json.loads((catalog / 'Contents.json').read_text())['images']
+appearances = set()
+for entry in entries:
+    appearance = entry.get('appearances', [{'value': 'light'}])[0]['value']
+    if appearance not in {'light', 'dark', 'tinted'}:
+        continue
+    data = (catalog / entry['filename']).read_bytes()
+    if data[:8] != b'\x89PNG\r\n\x1a\n' or struct.unpack('>II', data[16:24]) != (1024, 1024):
+        raise SystemExit(f'Invalid {appearance} app icon')
+    appearances.add(appearance)
+if appearances != {'light', 'dark', 'tinted'}:
+    raise SystemExit('Missing iOS Home Screen icon appearance')
+print('Validated light, dark, and tinted Home Screen icons.')
+PY
 (
   cd ios
   pod install 2>&1 | tee "$DIAGNOSTICS/pod-install.log"
@@ -115,6 +133,7 @@ metadata = {
     'app': 'Pocket', 'implementation': 'Expo', 'signed': False,
     'platform': 'iphoneos', 'architecture': 'arm64', 'configuration': 'Release',
     'includesSafariExtension': True, 'includesJavaScriptBundle': True,
+    'iconAppearances': ['light', 'dark', 'tinted'],
     'minimumIOS': '26.0', 'commit': commit,
     'expo': package['dependencies']['expo'], 'reactNative': package['dependencies']['react-native'],
     'builtAtUTC': datetime.datetime.now(datetime.timezone.utc).isoformat(),

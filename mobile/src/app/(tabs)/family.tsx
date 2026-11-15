@@ -4,10 +4,10 @@ import { router } from 'expo-router';
 import { useState } from 'react';
 import { Alert, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { Avatar, Card, GlassButton, Icon, Notice, Row, Screen, Section, Txt, usePalette } from '@/components/pocket-ui';
-import { money, usePocket } from '@/data';
+import { FAMILY_DELETE_UPDATE_MESSAGE, money, usePocket } from '@/data';
 
 export default function FamilyScreen() {
-  const { state, serverURL, busy, error, refresh, signOut } = usePocket();
+  const { state, serverURL, busy, error, refresh, signOut, deleteFamily } = usePocket();
   const colors = usePalette();
   const [refreshing, setRefreshing] = useState(false);
   const [copied, setCopied] = useState('');
@@ -34,6 +34,16 @@ export default function FamilyScreen() {
       { text: 'Cancel', style: 'cancel' },
       { text: 'Sign out', style: 'destructive', onPress: () => { void signOut().catch(() => undefined); } },
     ]);
+  }
+
+  function confirmDeleteFamily() {
+    if (state?.user.role !== 'parent') return;
+    if (!state.familyCode) { Alert.alert('Server update needed', FAMILY_DELETE_UPDATE_MESSAGE); return; }
+    const context = { familyCode: state.familyCode, serverURL, userId: state.user.id };
+    Alert.alert(`Delete ${state.familyName}?`, `This permanently deletes ${state.familyName} and all its members, balances, payment history, and connected computers. Everyone in this family will be signed out. Other families stay unchanged. This cannot be undone.`, [
+      { text: 'Cancel', style: 'cancel', isPreferred: true },
+      { text: 'Delete family', style: 'destructive', onPress: () => { void deleteFamily(context).catch(() => undefined); } },
+    ], { cancelable: true });
   }
 
   return (
@@ -102,6 +112,7 @@ export default function FamilyScreen() {
         {isParent && <Txt size={13} muted>Computer setup, connection, and removal are also logged in the parents’ Inbox.</Txt>}
         <Txt size={13} muted>Background phone alerts are not enabled in this app.</Txt>
       </Section>
+      {isParent ? <GlassButton label="Delete family" icon="trash" danger disabled={busy} onPress={confirmDeleteFamily} /> : null}
       <GlassButton label="Sign out" icon="logout" danger disabled={busy} onPress={confirmSignOut} />
     </Screen>
   );

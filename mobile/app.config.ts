@@ -7,6 +7,11 @@ const config: ExpoConfig = {
   icon: './assets/images/pocket.png',
   ios: {
     bundleIdentifier, supportsTablet: true,
+    icon: {
+      light: './assets/images/pocket.png',
+      dark: './assets/images/pocket-dark.png',
+      tinted: './assets/images/pocket-tinted.png',
+    },
     infoPlist: {
       NSLocalNetworkUsageDescription: 'Pocket connects to your family server on your local network.',
       NSAppTransportSecurity: { NSAllowsLocalNetworking: true },

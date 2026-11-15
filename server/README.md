@@ -36,9 +36,11 @@ For `DB_PATH=/app/data/pocket.sqlite`, storage is:
 - `/app/data/pocket.sqlite.families.sqlite`: registry containing family codes and database paths.
 - `/app/data/pocket.sqlite.families/<family UUID>.sqlite`: each newly registered family's database.
 
-All SQLite WAL/SHM sidecars belong to the same backup set. Back up the entire set with the supplied multi-family backup helper, or copy the complete data directory with the API stopped. Restoring only the legacy file will not restore additional families. Missing or unexpected registered database paths stop startup instead of silently creating an empty family. The API does not wipe data at startup and exposes no public family-deletion endpoint; the separate offline maintenance command handles an explicit administrator reset.
+All SQLite WAL/SHM sidecars belong to the same backup set. Back up the entire set with the supplied multi-family backup helper, or copy the complete data directory with the API stopped. Restoring only the legacy file will not restore additional families. Missing or unexpected registered database paths stop startup instead of silently creating an empty family. A signed-in parent can delete their current family after confirming in the app. Resetting every family remains a separate offline administrator operation.
 
 To make an online backup, run `node backup-families.mjs --db-path /absolute/path/pocket.sqlite`. Verified database copies and a manifest are written beneath `family-backups` beside the configured database. Docker installations with an explicit file list in `COPY` must bind-mount the helper script into the API container; the updated updater does this automatically. See [automatic updates and backups](../AUTO-UPDATE.md) and [the offline family reset procedure](../RESET-FAMILIES.md).
+
+Deleting a family clears its accounts, sessions, balances, receipts, inbox, computer credentials, voucher data, and device registrations. Other families are unchanged. Empty database files and deletion markers remain so backups and interrupted deletion can be recovered safely; existing backup copies are retained. Startup completes a previously confirmed deletion if it was interrupted. It also reconciles a backup containing an earlier registry snapshot with a later cleared family database, rather than recreating the deleted family. A restored pre-deletion backup without deletion markers contains the old data, so it should only be restored intentionally. Do not roll back to a server version without deletion support while a deletion is incomplete.
 
 ## Alerts
 
@@ -82,11 +84,12 @@ All routes below use JSON. There is no `/api` prefix. Errors return `{ "error": 
 
 | Method / path | Access | Result |
 |---|---|---|
-| `GET /health` | Public | `setupRequired`, `pushConfigured`, `capabilities.fts`, `capabilities.families:{multiple:true,registration:true}`; no family directory |
+| `GET /health` | Public | `setupRequired`, `pushConfigured`, `capabilities.fts`, `capabilities.families:{multiple:true,registration:true,deletion:true}`; no family directory |
 | `POST /families` | Public, rate limited | Creates a family from `{familyName,name,username,password}`; returns `token`, `user`, `familyName`, `familyCode` |
 | `POST /setup` | One-time setup code; registry empty | Legacy family setup; returns `token`, `user`, `familyName`, `familyCode` |
 | `POST /login` | Username/password and optional `familyCode` | Returns `token`, `user`, `familyName`, `familyCode` |
 | `POST /logout` | Signed in | Revokes current session and its device registrations |
+| `DELETE /family` | Current family's parent | Requires `{confirmation:"DELETE-FAMILY",familyCode:<current eight-digit code>}`; deletes this family's active data and returns `{ok:true}` |
 | `GET /state` | Signed in | Scoped `user`, `familyName`, `familyCode`, `members`, `transactions`, `notifications`, `computerNotifications`, `pushConfigured` |
 | `POST /members` | Parent | Adds `{name,username,password,role}`; returns `member` |
 | `POST /transactions` | Parent; child limited to self/purchase | Adds entry; returns `transaction`, `replayed` |
@@ -97,6 +100,8 @@ All routes below use JSON. There is no `/api` prefix. Errors return `{ "error": 
 | `DELETE /devices` | Token owner | Removes `{token}` |
 
 Manual transaction fields: `{childId,kind,amountCents,merchant,note,idempotencyKey}`. `kind` is `addition` or `purchase`; amount is 1–1,000,000 cents. `merchant` is the store or addition reason. Reusing an idempotency key with the same normalized payload returns the same transaction; a different payload returns HTTP 409. Purchases can take the tracked balance below zero, including when no opening balance was entered. A purchase already happened and must still be recorded and sent to its recipients. The app is a family ledger, not spending authorization; it does not change the funds in an external card account. Calculated balances must remain within JavaScript's safe integer range.
+
+Family deletion always derives its target from the authenticated session. The submitted family code is a stale-screen check, not a target selector: a different code returns 409, missing or incorrect confirmation returns 400, and a child receives 403. After success, that family's old user sessions and computer credentials no longer authenticate. The server blocks new work for the family before clearing it, finishes any already-sent generic push, and stops the remainder of its queued batch. Protected requests reauthenticate after reading their bodies so a delayed request cannot recreate data after deletion.
 
 FTS voucher issuance (`POST /fts/vouchers`, authenticated with the computer credential) accepts optional `items` on each report: `{reportId,movieCount,priceCents,items:[{path,status,oldPath?}]}`. Status is `added`, `removed`, `modified`, or `renamed`; only renamed items may have `oldPath`. Each report can supply up to 500 items and never more than its edit count. Paths are relative, use at most 500 UTF-16 code units, and may not contain drive names, parent traversal, empty/dot segments, control characters, or leading/trailing whitespace. Backslashes normalize to slashes. Duplicate paths within a report are rejected. This route accepts up to 512 KiB of JSON; other routes retain the 16 KiB limit.
 

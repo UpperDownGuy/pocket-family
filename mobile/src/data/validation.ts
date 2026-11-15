@@ -3,6 +3,7 @@ import type { AuthResponse, FamilyState, Member, ServerHealth } from './models';
 export const DEFAULT_SERVER_URL = 'http://127.0.0.1:8787';
 export const MAX_TRANSACTION_CENTS = 1_000_000;
 export const FAMILY_UPDATE_MESSAGE = 'Update the Pocket server to create separate families. Your existing family will stay unchanged.';
+export const FAMILY_DELETE_UPDATE_MESSAGE = 'Update the Pocket server before deleting a family. No family data has been deleted.';
 
 export function parseFamilyCode(value: unknown): string {
   if (typeof value !== 'string' || !/^[0-9]{8}$/.test(value)) throw new Error('Enter the eight-digit family code, including any leading zero.');
@@ -80,6 +81,7 @@ export function parseHealth(value: unknown): ServerHealth {
     if (value.capabilities.families !== undefined) {
       const families = value.capabilities.families;
       if (!record(families) || typeof families.multiple !== 'boolean' || typeof families.registration !== 'boolean') invalidResponse();
+      if (families.deletion !== undefined && typeof families.deletion !== 'boolean') invalidResponse();
     }
   }
   return value as unknown as ServerHealth;
