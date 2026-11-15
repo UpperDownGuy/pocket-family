@@ -17,7 +17,7 @@ const tokenB = 'B'.repeat(43);
 const parent = { id: 'parent-1', name: 'Parent', username: 'parent', role: 'parent' as const };
 const child = { id: 'child-1', name: 'Child', username: 'child', role: 'child' as const, balanceCents: 1000 };
 function state(balanceCents = 1000): FamilyState {
-  return { user: parent, familyName: 'Family', members: [parent, { ...child, balanceCents }], transactions: [], notifications: [], pushConfigured: false };
+  return { user: parent, familyName: 'Family', members: [parent, { ...child, balanceCents }], transactions: [], notifications: [], computerNotifications: [], pushConfigured: false };
 }
 function response(payload: unknown, status = 200): FetchResponse { return { status, async json() { return payload; } }; }
 function deferred<T>() {

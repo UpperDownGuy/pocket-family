@@ -39,8 +39,9 @@ async function fixture(t) {
     const token = 'fts_' + code();
     const paired = await request('POST', '/fts/pair', { setupCode: created.setupCode, credential: token });
     assert.equal(paired.httpStatus, 200);
-    assert.deepEqual(paired.issuer, created.issuer);
-    return { ...created, token };
+    assert.ok(paired.issuer.pairedAt);
+    assert.deepEqual({ ...paired.issuer, pairedAt: null }, created.issuer);
+    return { ...created, issuer: paired.issuer, token };
   }
   const issuer = await pairIssuer(await request('POST', '/fts/issuers', { name: 'Desktop tracker', priceCents: 15 }, parent.token));
   const mint = (creditCode, reportList = reports(), token = issuer.token) => request('POST', '/fts/vouchers', { code: creditCode, reports: reportList }, token);
@@ -338,7 +339,11 @@ test('previous long-lived tracker credentials remain valid without any pairing r
   // with no entry in the newly added, optional setup-code table.
   f.app.store.db.prepare('DELETE FROM fts_pairings WHERE issuer_id=?').run(f.issuer.issuer.id);
   await f.reopen();
-  assert.equal((await f.request('GET', '/fts/connection', undefined, f.issuer.token)).httpStatus, 200);
+  const connection = await f.request('GET', '/fts/connection', undefined, f.issuer.token);
+  assert.equal(connection.httpStatus, 200);
+  assert.equal(connection.issuer.ownerId, f.parent.user.id);
+  assert.equal(connection.issuer.ownerName, f.parent.user.name);
+  assert.equal(connection.issuer.pairedAt, connection.issuer.createdAt);
   const voucher = code();
   assert.equal((await f.mint(voucher)).httpStatus, 200);
   assert.equal((await f.redeem(voucher)).status, 'redeemed');
@@ -362,4 +367,109 @@ test('pairing attempts are limited by connection IP and server-wide windows', as
     assert.equal((await f.request('POST', '/fts/pair', { setupCode: 'bad', credential: 'fts_' + code() })).httpStatus, 400);
   }
   assert.equal((await f.request('POST', '/fts/pair', { setupCode: f.issuer.setupCode, credential: f.issuer.token })).httpStatus, 429);
+});
+
+test('computer setup, connection, and removal are logged once for all parents without restricting child setup or changing balances', async t => {
+  const f = await fixture(t);
+  const created = await f.request('POST', '/fts/issuers', { name: 'Avery desktop', priceCents: 15 }, f.child.token);
+  assert.equal(created.httpStatus, 200);
+  assert.equal(created.issuer.ownerId, f.child.user.id);
+  assert.equal(created.issuer.ownerName, f.child.user.name);
+  assert.equal(created.issuer.pairedAt, null);
+  const forComputer = state => state.computerNotifications.filter(note => note.issuerId === created.issuer.id);
+  for (const parent of [f.parent, f.parent2]) {
+    const state = await f.state(parent);
+    assert.equal(forComputer(state).length, 1);
+    assert.equal(forComputer(state)[0].eventType, 'created');
+    assert.ok(forComputer(state)[0].body.includes(f.child.user.name));
+    assert.ok(forComputer(state)[0].body.includes('Avery desktop'));
+    assert.equal(state.transactions.length, 0);
+    assert.equal(state.notifications.length, 0);
+    assert.equal(state.members.filter(member => member.role === 'child').reduce((sum, member) => sum + member.balanceCents, 0), 0);
+  }
+  assert.deepEqual((await f.state(f.child)).computerNotifications, []);
+  assert.deepEqual((await f.state(f.sibling)).computerNotifications, []);
+  assert.equal((await f.request('GET', '/fts/issuers', undefined, f.parent.token)).issuers.find(issuer => issuer.id === created.issuer.id).ownerName, f.child.user.name);
+  const paired = await f.pairIssuer(created);
+  assert.ok(paired.issuer.pairedAt);
+  assert.equal((await f.request('POST', '/fts/pair', { setupCode: created.setupCode, credential: paired.token })).httpStatus, 200);
+  assert.deepEqual(forComputer(await f.state(f.parent)).map(note => note.eventType), ['paired', 'created']);
+  const creditCode = code();
+  assert.equal((await f.mint(creditCode, reports('computer-log-unclaimed'), paired.token)).httpStatus, 200);
+  assert.equal((await f.request('POST', `/fts/issuers/${created.issuer.id}/revoke`, {}, f.sibling.token)).httpStatus, 404);
+  const removed = await f.request('POST', `/fts/issuers/${created.issuer.id}/revoke`, {}, f.parent2.token);
+  assert.equal(removed.httpStatus, 200);
+  assert.ok(removed.issuer.revokedAt);
+  assert.equal((await f.request('POST', `/fts/issuers/${created.issuer.id}/revoke`, {}, f.parent.token)).issuer.revokedAt, removed.issuer.revokedAt);
+  assert.equal((await f.request('GET', '/fts/connection', undefined, paired.token)).httpStatus, 403);
+  assert.equal((await f.redeem(creditCode, f.child)).httpStatus, 403);
+  for (const parent of [f.parent, f.parent2]) {
+    const state = await f.state(parent);
+    const notes = forComputer(state);
+    assert.deepEqual(notes.map(note => note.eventType), ['removed', 'paired', 'created']);
+    assert.ok(notes[0].body.includes(f.parent2.user.name));
+    assert.ok(notes[0].body.includes(f.child.user.name));
+    assert.ok(notes.every(note => note.body.includes('Avery desktop')));
+    assert.equal(JSON.stringify(notes).includes(paired.token), false);
+    assert.equal(JSON.stringify(notes).includes(created.setupCode), false);
+    assert.equal(state.transactions.length, 0);
+    assert.equal(state.notifications.length, 0);
+  }
+  const firstParentNote = forComputer(await f.state(f.parent))[0];
+  const otherParentNote = forComputer(await f.state(f.parent2))[0];
+  await f.request('POST', '/notifications/read', { ids: [firstParentNote.id, otherParentNote.id] }, f.sibling.token);
+  assert.equal(forComputer(await f.state(f.parent))[0].readAt, null);
+  assert.equal(forComputer(await f.state(f.parent2))[0].readAt, null);
+  // Reading a mixed inbox batch updates owned computer and ledger alerts only.
+  const regularCredit = code();
+  await f.mint(regularCredit, reports('regular-credit-after-computer-log'));
+  await f.redeem(regularCredit, f.child);
+  const ledgerNote = (await f.state(f.parent)).notifications[0];
+  await f.request('POST', '/notifications/read', { ids: [firstParentNote.id, ledgerNote.id, otherParentNote.id] }, f.parent.token);
+  assert.ok(forComputer(await f.state(f.parent))[0].readAt);
+  assert.ok((await f.state(f.parent)).notifications[0].readAt);
+  assert.equal(forComputer(await f.state(f.parent2))[0].readAt, null);
+  assert.equal((await f.state(f.parent2)).notifications[0].readAt, null);
+  assert.deepEqual((await f.state(f.child)).computerNotifications, []);
+  assert.deepEqual((await f.state(f.sibling)).computerNotifications, []);
+});
+
+test('computer event failures roll back setup, pairing, and removal with their parent alerts', async t => {
+  const f = await fixture(t);
+  const counts = () => Object.fromEntries(['fts_issuers', 'fts_pairings', 'fts_events', 'fts_event_notifications']
+    .map(table => [table, f.app.store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count]));
+  const before = counts();
+  f.app.store.db.exec("CREATE TRIGGER reject_computer_notice BEFORE INSERT ON fts_event_notifications BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;");
+  assert.equal((await f.request('POST', '/fts/issuers', { name: 'Must roll back', priceCents: 15 }, f.child.token)).httpStatus, 500);
+  assert.deepEqual(counts(), before);
+  f.app.store.db.exec('DROP TRIGGER reject_computer_notice');
+  const created = await f.request('POST', '/fts/issuers', { name: 'Atomic desktop', priceCents: 15 }, f.child.token);
+  const credential = 'fts_' + code();
+  const beforePair = counts();
+  f.app.store.db.exec("CREATE TRIGGER reject_computer_pair BEFORE INSERT ON fts_events WHEN NEW.event_type='paired' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;");
+  assert.equal((await f.request('POST', '/fts/pair', { setupCode: created.setupCode, credential })).httpStatus, 500);
+  assert.deepEqual(counts(), beforePair);
+  assert.equal(f.app.store.db.prepare('SELECT paired_at FROM fts_pairings WHERE issuer_id=?').get(created.issuer.id).paired_at, null);
+  assert.equal((await f.request('GET', '/fts/connection', undefined, credential)).httpStatus, 401);
+  f.app.store.db.exec('DROP TRIGGER reject_computer_pair');
+  assert.equal((await f.request('POST', '/fts/pair', { setupCode: created.setupCode, credential })).httpStatus, 200);
+  const beforeRemoval = counts();
+  f.app.store.db.exec("CREATE TRIGGER reject_computer_removal BEFORE INSERT ON fts_events WHEN NEW.event_type='removed' BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;");
+  assert.equal((await f.request('POST', `/fts/issuers/${created.issuer.id}/revoke`, {}, f.parent.token)).httpStatus, 500);
+  assert.deepEqual(counts(), beforeRemoval);
+  assert.equal(f.app.store.db.prepare('SELECT revoked_at FROM fts_issuers WHERE id=?').get(created.issuer.id).revoked_at, null);
+  assert.equal((await f.request('GET', '/fts/connection', undefined, credential)).httpStatus, 200);
+  f.app.store.db.exec('DROP TRIGGER reject_computer_removal');
+  assert.equal((await f.request('POST', `/fts/issuers/${created.issuer.id}/revoke`, {}, f.parent.token)).httpStatus, 200);
+  assert.equal((await f.request('GET', '/fts/connection', undefined, credential)).httpStatus, 403);
+  assert.equal((await f.state(f.parent)).transactions.length, 0);
+  assert.deepEqual((await f.state(f.child)).computerNotifications, []);
+});
+
+test('health reports supported computer setup and parent logging capabilities without account data', async t => {
+  const f = await fixture(t);
+  const health = await f.request('GET', '/health');
+  assert.equal(health.httpStatus, 200);
+  assert.deepEqual(health.capabilities, { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true } });
+  assert.deepEqual(Object.keys(health).sort(), ['capabilities', 'httpStatus', 'pushConfigured', 'setupRequired']);
 });

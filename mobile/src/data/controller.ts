@@ -221,8 +221,10 @@ export class PocketController implements PocketActions {
     return session.api.listFTSIssuers(session.token);
   });
 
+  checkFTSSupport = async () => this.sessionResult(async session => session.api.checkFTSSupport());
+
   createFTSIssuer = async (name: string, priceCents: number) => this.sessionResult(async session => {
-    if (!name.trim() || name.trim().length > 100 || !Number.isSafeInteger(priceCents) || priceCents <= 0 || priceCents > MAX_TRANSACTION_CENTS) {
+    if (!name.trim() || name.trim().length > 60 || !Number.isSafeInteger(priceCents) || priceCents <= 0 || priceCents > MAX_TRANSACTION_CENTS) {
       throw new Error('Enter a name and a price from $0.01 to $10,000.00.');
     }
     return session.api.createFTSIssuer(session.token, name.trim(), priceCents);

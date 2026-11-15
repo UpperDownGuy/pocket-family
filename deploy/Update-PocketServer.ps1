@@ -7,6 +7,7 @@ param(
     [string]$HealthUrl = 'https://pocket.alexxweb.com/health',
     [ValidateRange(15, 600)][int]$HealthTimeoutSeconds = 90,
     [switch]$RetryFailed,
+    [switch]$ForceRebuild,
     [switch]$CheckOnly
 )
 
@@ -96,7 +97,9 @@ function Write-PocketJSONFile {
     param([string]$Path, $Value)
     $pending = $Path + '.pending'
     [IO.File]::WriteAllText($pending, (ConvertTo-Json $Value -Depth 10), (New-Object Text.UTF8Encoding($false)))
-    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($pending, $Path, $null) }
+    # Windows PowerShell 5.1 coerces $null to an empty string for this .NET
+    # parameter. Pass a CLR null so replacing an existing marker stays atomic.
+    if (Test-Path -LiteralPath $Path) { [IO.File]::Replace($pending, $Path, [NullString]::Value) }
     else { [IO.File]::Move($pending, $Path) }
 }
 
@@ -314,6 +317,7 @@ function Invoke-PocketUpdate {
         [int]$HealthTimeoutSeconds = 90,
         [switch]$CheckOnly,
         [switch]$RetryFailed,
+        [switch]$ForceRebuild,
         [scriptblock]$Runner = { param($request) Invoke-PocketNativeProcess $request }
     )
     $repo = [IO.Path]::GetFullPath($RepoPath).TrimEnd('\', '/')
@@ -371,17 +375,32 @@ function Invoke-PocketUpdate {
         $previous = $null
         if (Test-Path -LiteralPath $successPath -PathType Leaf) {
             $previous = ConvertFrom-PocketJSON (Get-Content -Raw -LiteralPath $successPath) 'last successful deployment'
+            if ((Get-PocketProperty $previous 'Version' 0) -ne 1 -or
+                (Get-PocketProperty $previous 'ImageId' '') -notmatch '^sha256:[a-f0-9]{64}$' -or
+                (Get-PocketProperty $previous 'ServerTree' '') -notmatch '^[a-f0-9]{40,64}$' -or
+                (Get-PocketProperty $previous 'UpstreamCommit' '') -notmatch '^[a-f0-9]{40,64}$' -or
+                (Get-PocketProperty $previous 'LiveHead' '') -notmatch '^[a-f0-9]{40,64}$') {
+                throw 'Last successful deployment state is incomplete. Review the saved state before updating.'
+            }
             if ($previous.ImageId -ne $before.ImageId) { throw 'The running image changed outside the updater. Review deployment state before continuing.' }
+        }
+        if ($ForceRebuild) {
+            Write-PocketLog $context 'Manual rebuild requested; revision caches and failure backoff will be bypassed. All deployment checks remain enabled.'
+        } elseif ($null -eq $previous) {
+            Write-PocketLog $context 'No verified deployment state exists for the running image. Build and verify the merged source before trusting no-change checks.'
         }
         $remoteLine = (Invoke-PocketCommand $context 'CheckRemoteHead' 'git.exe' @('-C', $repo, 'ls-remote', '--exit-code', 'origin', ('refs/heads/' + $UpstreamRef)) 120).Trim()
         if ($remoteLine -notmatch '^([a-f0-9]{40,64})\s+refs/heads/') { throw 'Could not identify the upstream branch.' }
         $remoteHead = $Matches[1]
-        if ($null -ne $previous -and $previous.UpstreamCommit -eq $remoteHead -and $previous.LiveHead -eq $liveHead -and (Get-PocketProperty $previous 'ConfigHash' '') -eq $config.Hash) {
+        if (-not $ForceRebuild -and $null -ne $previous -and $previous.UpstreamCommit -eq $remoteHead -and $previous.LiveHead -eq $liveHead -and (Get-PocketProperty $previous 'ConfigHash' '') -eq $config.Hash) {
             Write-PocketLog $context 'Upstream, live source and active image match the successful deployment; no build needed.'
             return [pscustomobject]@{ ExitCode = 0; Status = 'Already up to date.' }
         }
         $checkPath = Join-Path $stateDir 'last-check.json'
-        if (Test-Path -LiteralPath $checkPath) {
+        # A no-change cache only describes source. Until an image has actually
+        # been built, activated and recorded as healthy, it cannot establish
+        # that the running container contains that source.
+        if (-not $ForceRebuild -and $null -ne $previous -and (Test-Path -LiteralPath $checkPath)) {
             $checked = ConvertFrom-PocketJSON (Get-Content -Raw -LiteralPath $checkPath) 'last check cache'
             if (Test-PocketRevisionMarker $checked $remoteHead $liveHead $before.ImageId $config.Hash) {
                 Write-PocketLog $context 'Previously checked revision has no server changes; skipping clone and merge.'
@@ -389,7 +408,7 @@ function Invoke-PocketUpdate {
             }
         }
         $failurePath = Join-Path $stateDir 'last-failure.json'
-        if (-not $RetryFailed -and -not $CheckOnly -and (Test-Path -LiteralPath $failurePath)) {
+        if (-not $ForceRebuild -and -not $RetryFailed -and -not $CheckOnly -and (Test-Path -LiteralPath $failurePath)) {
             $failed = ConvertFrom-PocketJSON (Get-Content -Raw -LiteralPath $failurePath) 'failure backoff'
             if ((Test-PocketRevisionMarker $failed $remoteHead $liveHead $before.ImageId $config.Hash) -and ([DateTime]$failed.NextAttemptUtc).ToUniversalTime() -gt [DateTime]::UtcNow) {
                 Write-PocketLog $context 'This unchanged failed revision is in its 15-minute retry backoff; no backup or build.'
@@ -414,8 +433,10 @@ function Invoke-PocketUpdate {
         $mergedCommit = (Invoke-PocketCommand $context 'ReadMergedCommit' 'git.exe' @('-C', $candidate, 'rev-parse', 'HEAD')).Trim()
         $serverTree = (Invoke-PocketCommand $context 'ReadCandidateTree' 'git.exe' @('-C', $candidate, 'rev-parse', 'HEAD:server')).Trim()
         if ($upstreamCommit -notmatch '^[a-f0-9]{40,64}$' -or $mergedCommit -notmatch '^[a-f0-9]{40,64}$' -or $serverTree -notmatch '^[a-f0-9]{40,64}$') { throw 'Candidate source identifiers are invalid.' }
-        $baselineTree = if ($null -ne $previous) { $previous.ServerTree } else { (Invoke-PocketCommand $context 'ReadLiveTree' 'git.exe' @('-C', $repo, 'rev-parse', 'HEAD:server')).Trim() }
-        if ($serverTree -eq $baselineTree) {
+        # HEAD in the live checkout may already have been pulled without a
+        # corresponding Docker build. Only a verified deployment marker can
+        # provide the running image's source-tree baseline.
+        if (-not $ForceRebuild -and $null -ne $previous -and $serverTree -eq $previous.ServerTree) {
             Write-PocketJSONFile $checkPath ([ordered]@{ CheckedAt = [DateTime]::UtcNow.ToString('o'); RemoteHead = $upstreamCommit;
                 LiveHead = $liveHead; ImageId = $before.ImageId; ConfigHash = $config.Hash; ServerTree = $serverTree })
             Write-PocketLog $context 'No server-tree changes. No backup, build or activation was run.'
@@ -498,7 +519,7 @@ function Invoke-PocketUpdate {
 if ($MyInvocation.InvocationName -ne '.') {
     try {
         if ([string]::IsNullOrWhiteSpace($RepoPath)) { throw 'Pass -RepoPath with the existing live Pocket checkout.' }
-        $result = Invoke-PocketUpdate -RepoPath $RepoPath -StateDirectory $StateDirectory -UpstreamRef $UpstreamRef -HealthUrl $HealthUrl -HealthTimeoutSeconds $HealthTimeoutSeconds -CheckOnly:$CheckOnly -RetryFailed:$RetryFailed
+        $result = Invoke-PocketUpdate -RepoPath $RepoPath -StateDirectory $StateDirectory -UpstreamRef $UpstreamRef -HealthUrl $HealthUrl -HealthTimeoutSeconds $HealthTimeoutSeconds -CheckOnly:$CheckOnly -RetryFailed:$RetryFailed -ForceRebuild:$ForceRebuild
         Write-Output $result.Status
         exit $result.ExitCode
     } catch {

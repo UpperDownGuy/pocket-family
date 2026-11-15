@@ -66,7 +66,7 @@ export default function FamilyScreen() {
       ) : null}
       <Section title="Connection">
         <Card><Row icon="server" title="Server" detail={serverURL} onPress={() => router.push('/server')} /></Card>
-        <Card><Row icon="computer" title="File Tracker" detail="Connect your computer to issue earnings codes." onPress={() => router.push('/file-tracker')} /></Card>
+        <Card><Row icon="computer" title="File Tracker" detail={isParent ? 'View and remove family computers, or connect a new one.' : 'Connect your computer to issue earnings codes.'} onPress={() => router.push('/file-tracker')} /></Card>
       </Section>
       <Section title="Safari purchases">
         <Card style={styles.info}>
@@ -82,6 +82,7 @@ export default function FamilyScreen() {
       </Section>
       <Section title="Notifications">
         <Card><Row icon="inbox" title="In-app inbox" detail="Parents and the child involved receive each balance change. Open Pocket to see updates." onPress={() => router.push('/(tabs)/inbox')} /></Card>
+        {isParent && <Txt size={13} muted>Computer setup, connection, and removal are also logged in the parents’ Inbox.</Txt>}
         <Txt size={13} muted>Background phone alerts are not enabled in this app.</Txt>
       </Section>
       <GlassButton label="Sign out" icon="logout" danger disabled={busy} onPress={confirmSignOut} />

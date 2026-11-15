@@ -87,7 +87,7 @@ test('credit APIs keep redemption codes out of URLs and use only the configured 
 test('a setup key arriving after sign-out is rejected instead of being exposed to the next account', async () => {
   const pending = deferred<FetchResponse>();
   const started = deferred<void>();
-  const current: FamilyState = { user: parent, members: [parent, child], familyName: 'Test', transactions: [], notifications: [], pushConfigured: false };
+  const current: FamilyState = { user: parent, members: [parent, child], familyName: 'Test', transactions: [], notifications: [], computerNotifications: [], pushConfigured: false };
   const transport: FetchTransport = async (url, options) => {
     switch (new URL(url).pathname) {
       case '/health': return response({ setupRequired: false, pushConfigured: false });
@@ -110,7 +110,7 @@ test('a setup key arriving after sign-out is rejected instead of being exposed t
 
 test('a child can manage their File Tracker connection while sibling redemption and invalid rates remain blocked', async () => {
   let creditCalls = 0;
-  const current: FamilyState = { user: child, members: [child], familyName: 'Test', transactions: [], notifications: [], pushConfigured: false };
+  const current: FamilyState = { user: child, members: [child], familyName: 'Test', transactions: [], notifications: [], computerNotifications: [], pushConfigured: false };
   const controller = new PocketController(new Storage(), async (url, options) => {
     const path = new URL(url).pathname;
     if (path === '/health') return response({ setupRequired: false, pushConfigured: false });
@@ -139,6 +139,7 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const api = new PocketAPI(url, (value, options) => fetch(value, options));
+  assert.equal(await api.checkFTSSupport(), true);
   const owner = await api.setup({ familyName: 'Test', name: 'Parent', username: 'parent', password: 'parent-password', setupCode: app.store.setupCode });
   await api.addMember(owner.token, { name: 'Avery', username: 'avery', role: 'child', password: 'child-password' });
   await api.addMember(owner.token, { name: 'Jordan', username: 'jordan', role: 'child', password: 'child-password' });
@@ -146,12 +147,17 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   const jordan = await api.signIn('jordan', 'child-password');
   const created = await api.createFTSIssuer(owner.token, 'FTS Desktop', 15);
   assert.match(created.setupCode, /^[0-9]{8}$/);
+  assert.equal(created.issuer.ownerId, owner.user.id);
+  assert.equal(created.issuer.ownerName, 'Parent');
+  assert.equal(created.issuer.pairedAt, null);
   const credential = `fts_${randomBytes(32).toString('base64url')}`;
   const pairing = await fetch(`${url}/fts/pair`, { method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ setupCode: created.setupCode, credential }) });
   assert.equal(pairing.status, 200);
   assert.equal((await pairing.json()).issuer.id, created.issuer.id);
-  assert.equal((await api.listFTSIssuers(owner.token))[0].id, created.issuer.id);
+  const connected = (await api.listFTSIssuers(owner.token))[0];
+  assert.equal(connected.id, created.issuer.id);
+  assert.ok(connected.pairedAt);
   const childConnection = await api.createFTSIssuer(avery.token, 'Avery Desktop', 25);
   assert.deepEqual((await api.listFTSIssuers(avery.token)).map(value => value.id), [childConnection.issuer.id]);
   assert.deepEqual(await api.listFTSIssuers(jordan.token), []);
@@ -159,6 +165,14 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   await assert.rejects(api.revokeFTSIssuer(jordan.token, childConnection.issuer.id), error => error instanceof APIError && error.status === 404);
   await assert.rejects(api.revokeFTSIssuer(avery.token, created.issuer.id), error => error instanceof APIError && error.status === 404);
   assert.ok((await api.revokeFTSIssuer(avery.token, childConnection.issuer.id)).revokedAt);
+  const computerLog = (await api.state(owner.token)).computerNotifications;
+  assert.ok(computerLog.some(item => item.issuerId === childConnection.issuer.id && item.eventType === 'created'));
+  assert.ok(computerLog.some(item => item.issuerId === childConnection.issuer.id && item.eventType === 'removed'));
+  assert.ok(computerLog.some(item => item.issuerId === created.issuer.id && item.eventType === 'paired'));
+  assert.deepEqual((await api.state(avery.token)).computerNotifications, []);
+  assert.deepEqual((await api.state(jordan.token)).computerNotifications, []);
+  await api.markRead(avery.token, computerLog.map(item => item.id));
+  assert.ok((await api.state(owner.token)).computerNotifications.every(item => item.readAt === null));
   async function issue(value: string, id: string) {
     const result = await fetch(`${url}/fts/vouchers`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${credential}` },
       body: JSON.stringify({ code: value, reports: [{ reportId: id, movieCount: 3, priceCents: 15 }] }) });
@@ -172,6 +186,10 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   assert.equal((await api.state(owner.token)).notifications.length, 1);
   assert.equal((await api.state(avery.token)).notifications.length, 1);
   assert.equal((await api.state(jordan.token)).notifications.length, 0);
+  const allInbox = await api.state(owner.token);
+  await api.markRead(owner.token, [...allInbox.notifications, ...allInbox.computerNotifications].map(item => item.id));
+  const readInbox = await api.state(owner.token);
+  assert.ok([...readInbox.notifications, ...readInbox.computerNotifications].every(item => item.readAt !== null));
   await assert.rejects(api.redeemCredit(jordan.token, code), /already.*redeemed/i);
   const second = 'D'.repeat(43);
   await issue(second, 'report-2');

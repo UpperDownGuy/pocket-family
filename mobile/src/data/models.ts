@@ -29,12 +29,23 @@ export interface InboxNotification {
   readAt: string | null;
 }
 
+export interface ComputerNotification {
+  id: string;
+  issuerId: string;
+  eventType: 'created' | 'paired' | 'removed';
+  title: string;
+  body: string;
+  createdAt: string;
+  readAt: string | null;
+}
+
 export interface FamilyState {
   user: Member;
   familyName: string;
   members: Member[];
   transactions: LedgerTransaction[];
   notifications: InboxNotification[];
+  computerNotifications: ComputerNotification[];
   pushConfigured: boolean;
 }
 
@@ -47,6 +58,7 @@ export interface AuthResponse {
 export interface ServerHealth {
   setupRequired: boolean;
   pushConfigured: boolean;
+  capabilities?: { fts?: { setupCodeDigits: number; childCanConnect: boolean; parentComputerLog: boolean } };
 }
 
 export interface SetupInput {
@@ -83,7 +95,10 @@ export interface CreditVoucher {
   redeemedAt: string | null;
 }
 export interface CreditRedemption extends CreditVoucher { status: 'redeemed'; replayed: boolean }
-export interface FTSIssuer { id: string; name: string; priceCents: number; createdAt: string; revokedAt: string | null }
+export interface FTSIssuer {
+  id: string; name: string; priceCents: number; createdAt: string; revokedAt: string | null;
+  ownerId?: string; ownerName?: string; pairedAt?: string | null;
+}
 export interface IssuedFTSKey { issuer: FTSIssuer; setupCode: string; expiresAt: string }
 
 export interface PocketSnapshot {
@@ -107,6 +122,7 @@ export interface PocketActions {
   previewCredit(code: string): Promise<CreditVoucher>;
   redeemCredit(code: string, childId?: string): Promise<CreditRedemption>;
   listFTSIssuers(): Promise<FTSIssuer[]>;
+  checkFTSSupport(): Promise<boolean>;
   createFTSIssuer(name: string, priceCents: number): Promise<IssuedFTSKey>;
   revokeFTSIssuer(id: string): Promise<FTSIssuer>;
   markRead(ids: string[]): Promise<void>;

@@ -1,9 +1,10 @@
 export { PocketProvider, usePocket } from './PocketProvider';
 export { createRequestID } from './ids';
-export { parseCreditCode } from './credits';
+export { FTS_SERVER_UPDATE_MESSAGE, parseCreditCode } from './credits';
+export { inboxItems, inboxDestination } from './inbox';
 export { centsFromInput, money, initials, validateServerURL, DEFAULT_SERVER_URL } from './validation';
 export type {
-  Member, MemberRole, LedgerTransaction, TransactionKind, InboxNotification,
+  Member, MemberRole, LedgerTransaction, TransactionKind, InboxNotification, ComputerNotification,
   FamilyState, ServerHealth, SetupInput, MemberInput, TransactionInput, PocketContextValue,
   CreditVoucher, CreditRedemption, FTSIssuer, IssuedFTSKey,
 } from './models';

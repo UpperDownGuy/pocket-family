@@ -1,6 +1,8 @@
 import type { CreditRedemption, CreditVoucher, FTSIssuer, IssuedFTSKey } from './models';
 import { MAX_TRANSACTION_CENTS } from './validation';
 
+export const FTS_SERVER_UPDATE_MESSAGE = 'Update the Pocket server to enable kids’ setup keys and the parent computer log. Then refresh this page.';
+
 /** Only Pocket's own code format is accepted. A QR never chooses a server. */
 export function parseCreditCode(value: unknown): string {
   if (typeof value !== 'string') throw new Error('This is not a Pocket earnings code.');
@@ -37,7 +39,13 @@ export function parseIssuer(value: unknown): FTSIssuer {
   if (!object(value) || typeof value.id !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(value.id) ||
       typeof value.name !== 'string' || !value.name.trim() || value.name.length > 100 ||
       !positive(value.priceCents, MAX_TRANSACTION_CENTS) || !date(value.createdAt) || !(value.revokedAt === null || date(value.revokedAt))) invalid();
-  return { id: value.id, name: value.name, priceCents: value.priceCents, createdAt: value.createdAt, revokedAt: value.revokedAt };
+  if (value.ownerId !== undefined || value.ownerName !== undefined) {
+    if (typeof value.ownerId !== 'string' || !value.ownerId || typeof value.ownerName !== 'string' || !value.ownerName.trim()) invalid();
+  }
+  if (!(value.pairedAt === undefined || value.pairedAt === null || date(value.pairedAt))) invalid();
+  return { id: value.id, name: value.name, priceCents: value.priceCents, createdAt: value.createdAt, revokedAt: value.revokedAt,
+    ...(typeof value.ownerId === 'string' ? { ownerId: value.ownerId, ownerName: value.ownerName as string } : {}),
+    ...(value.pairedAt !== undefined ? { pairedAt: value.pairedAt } : {}) };
 }
 
 export function parseIssuers(value: unknown): FTSIssuer[] {

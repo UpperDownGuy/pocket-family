@@ -22,7 +22,10 @@ const publicUser = row => ({ id: row.id, name: row.name, username: row.username,
 const transactionJSON = row => ({ id: row.id, childId: row.child_id, childName: row.child_name, kind: row.kind,
   amountCents: row.amount_cents, merchant: row.merchant, note: row.note, createdAt: row.created_at });
 const issuerJSON = row => ({ id: row.id, name: row.name, priceCents: row.price_cents,
-  createdAt: row.created_at, revokedAt: row.revoked_at });
+  createdAt: row.created_at, revokedAt: row.revoked_at, ownerId: row.created_by, ownerName: row.owner_name,
+  pairedAt: row.pairing_id == null ? row.created_at : row.paired_at });
+const issuerSelect = `SELECT i.*,m.name AS owner_name,p.issuer_id AS pairing_id,p.paired_at
+  FROM fts_issuers i JOIN members m ON m.id=i.created_by LEFT JOIN fts_pairings p ON p.issuer_id=i.id`;
 function voucherCode(value) {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) fail(400, 'Scan a valid Pocket credit code.');
   return value;
@@ -70,6 +73,12 @@ export class FamilyStore {
       CREATE INDEX IF NOT EXISTS fts_voucher_issuer ON fts_vouchers(issuer_id);
       CREATE TABLE IF NOT EXISTS fts_pairings (code_hash TEXT PRIMARY KEY,issuer_id TEXT NOT NULL UNIQUE REFERENCES fts_issuers(id),
         expires_at INTEGER NOT NULL,paired_at TEXT);
+      CREATE TABLE IF NOT EXISTS fts_events (id TEXT PRIMARY KEY,issuer_id TEXT NOT NULL REFERENCES fts_issuers(id),
+        event_type TEXT NOT NULL CHECK(event_type IN ('created','paired','removed')),actor_id TEXT NOT NULL REFERENCES members(id),
+        title TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(issuer_id,event_type));
+      CREATE TABLE IF NOT EXISTS fts_event_notifications (id TEXT PRIMARY KEY,recipient_id TEXT NOT NULL REFERENCES members(id),
+        event_id TEXT NOT NULL REFERENCES fts_events(id),read_at TEXT,UNIQUE(recipient_id,event_id));
+      CREATE INDEX IF NOT EXISTS fts_notification_recipient ON fts_event_notifications(recipient_id,event_id);
     `);
   }
   atomic(action) {
@@ -141,10 +150,12 @@ export class FamilyStore {
       // The initial strong credential is never exposed or usable by the app.
       // FTS supplies its own persisted credential during the one-time pairing.
       const token = 'fts_' + randomBytes(32).toString('base64url');
-      const row = { id: randomUUID(), name, price_cents: input.priceCents, created_at: new Date().toISOString(), revoked_at: null };
+      const row = { id: randomUUID(), name, price_cents: input.priceCents, created_at: new Date().toISOString(), revoked_at: null,
+        created_by: user.id, owner_name: user.name, pairing_id: 'pending', paired_at: null };
       const expiresAt = Date.now() + 10 * 60 * 1000;
       this.db.prepare('INSERT INTO fts_issuers VALUES (?,?,?,?,?,?,NULL)').run(row.id, name, hash(token), input.priceCents, row.created_at, user.id);
       this.db.prepare('INSERT INTO fts_pairings VALUES (?,?,?,NULL)').run(hash(setupCode), row.id, expiresAt);
+      this.appendFTSEvent(row, 'created', user, row.created_at);
       return { issuer: issuerJSON(row), setupCode, expiresAt: new Date(expiresAt).toISOString() };
     });
   }
@@ -154,7 +165,7 @@ export class FamilyStore {
     if (typeof input.credential !== 'string' || !/^fts_[A-Za-z0-9_-]{43}$/.test(input.credential)) fail(400, 'FTS must provide a valid connection credential.');
     const credentialHash = hash(input.credential);
     return this.atomic(() => {
-      const row = this.db.prepare(`SELECT i.*,p.expires_at,p.paired_at FROM fts_pairings p JOIN fts_issuers i ON i.id=p.issuer_id WHERE p.code_hash=?`).get(hash(input.setupCode));
+      const row = this.db.prepare(`${issuerSelect} WHERE p.code_hash=?`).get(hash(input.setupCode));
       if (!row) fail(400, 'That setup code is invalid. Generate a new one in Pocket.');
       if (row.revoked_at) fail(403, 'This file tracker has been disconnected. Generate a new setup code in Pocket.');
       if (row.paired_at) {
@@ -163,36 +174,55 @@ export class FamilyStore {
         if (row.token_hash !== credentialHash) fail(409, 'That setup code has already been used. Generate a new one in Pocket.');
         return { issuer: issuerJSON(row) };
       }
-      if (row.expires_at <= Date.now()) fail(410, 'That setup code has expired. Generate a new one in Pocket.');
+      const pairing = this.db.prepare('SELECT expires_at FROM fts_pairings WHERE issuer_id=?').get(row.id);
+      if (pairing.expires_at <= Date.now()) fail(410, 'That setup code has expired. Generate a new one in Pocket.');
       if (this.db.prepare('SELECT id FROM fts_issuers WHERE token_hash=? AND id<>?').get(credentialHash, row.id)) fail(409, 'Use a fresh FTS connection credential for this setup code.');
       this.db.prepare('UPDATE fts_issuers SET token_hash=? WHERE id=?').run(credentialHash, row.id);
-      this.db.prepare('UPDATE fts_pairings SET paired_at=? WHERE issuer_id=?').run(new Date().toISOString(), row.id);
+      row.paired_at = new Date().toISOString();
+      this.db.prepare('UPDATE fts_pairings SET paired_at=? WHERE issuer_id=?').run(row.paired_at, row.id);
+      this.appendFTSEvent(row, 'paired', { id: row.created_by, name: row.owner_name }, row.paired_at);
       return { issuer: issuerJSON(row) };
     });
   }
   listFTSIssuers(user) {
     const rows = user.role === 'parent'
-      ? this.db.prepare('SELECT * FROM fts_issuers ORDER BY created_at DESC,rowid DESC').all()
-      : this.db.prepare('SELECT * FROM fts_issuers WHERE created_by=? ORDER BY created_at DESC,rowid DESC').all(user.id);
+      ? this.db.prepare(`${issuerSelect} ORDER BY i.created_at DESC,i.rowid DESC`).all()
+      : this.db.prepare(`${issuerSelect} WHERE i.created_by=? ORDER BY i.created_at DESC,i.rowid DESC`).all(user.id);
     return { issuers: rows.map(issuerJSON) };
   }
   revokeFTSIssuer(user, id) {
     return this.atomic(() => {
-      const row = this.db.prepare('SELECT * FROM fts_issuers WHERE id=?').get(id);
+      const row = this.db.prepare(`${issuerSelect} WHERE i.id=?`).get(id);
       if (!row || (user.role !== 'parent' && row.created_by !== user.id)) fail(404, 'File tracker not found.');
-      row.revoked_at ||= new Date().toISOString();
-      this.db.prepare('UPDATE fts_issuers SET revoked_at=? WHERE id=?').run(row.revoked_at, id);
+      if (!row.revoked_at) {
+        row.revoked_at = new Date().toISOString();
+        this.db.prepare('UPDATE fts_issuers SET revoked_at=? WHERE id=?').run(row.revoked_at, id);
+        this.appendFTSEvent(row, 'removed', user, row.revoked_at);
+      }
       return { issuer: issuerJSON(row), revokedAt: row.revoked_at };
     });
   }
   authenticateFTSIssuer(header, { allowRevoked = false } = {}) {
     if (typeof header !== 'string' || !/^Bearer fts_[A-Za-z0-9_-]{43}$/.test(header)) fail(401, 'Connect FTS with a Pocket connection key.');
-    const row = this.db.prepare('SELECT * FROM fts_issuers WHERE token_hash=?').get(hash(header.slice(7)));
+    const row = this.db.prepare(`${issuerSelect} WHERE i.token_hash=?`).get(hash(header.slice(7)));
     if (!row) fail(401, 'The file tracker key is invalid. Reconnect it in Pocket.');
     if (row.revoked_at && !allowRevoked) fail(403, 'This file tracker has been disconnected.');
     return row;
   }
   ftsConnection(issuer) { return { issuer: issuerJSON(issuer) }; }
+  // Keep computer activity separate from balance notifications: connecting a
+  // tracker does not create a ledger transaction or a background push.
+  appendFTSEvent(issuer, eventType, actor, createdAt) {
+    const detail = {
+      created: [`${issuer.name}: setup created`, `${actor.name} created a setup code for ${issuer.name}.`],
+      paired: [`${issuer.name}: connected`, `${issuer.name} connected using ${issuer.owner_name}'s setup code.`],
+      removed: [`${issuer.name}: removed`, `${actor.name} removed ${issuer.name}, owned by ${issuer.owner_name}.`],
+    }[eventType];
+    const eventId = randomUUID();
+    this.db.prepare('INSERT INTO fts_events VALUES (?,?,?,?,?,?,?)').run(eventId, issuer.id, eventType, actor.id, detail[0], detail[1], createdAt);
+    const parents = this.db.prepare("SELECT id FROM members WHERE role='parent'").all();
+    for (const parent of parents) this.db.prepare('INSERT INTO fts_event_notifications VALUES (?,?,?,NULL)').run(randomUUID(), parent.id, eventId);
+  }
   getFTSVoucher(code) {
     return this.db.prepare(`SELECT v.*,i.revoked_at FROM fts_vouchers v JOIN fts_issuers i ON i.id=v.issuer_id WHERE v.code_hash=?`).get(hash(voucherCode(code)));
   }
@@ -280,9 +310,13 @@ export class FamilyStore {
       ? this.db.prepare(`${sql} ORDER BY t.created_at DESC,t.rowid DESC`).all()
       : this.db.prepare(`${sql} WHERE t.child_id=? ORDER BY t.created_at DESC,t.rowid DESC`).all(user.id);
     const notes = this.db.prepare('SELECT * FROM notifications WHERE recipient_id=? ORDER BY created_at DESC,rowid DESC').all(user.id);
+    const computerNotes = user.role === 'parent' ? this.db.prepare(`SELECT n.id,n.read_at,e.issuer_id,e.event_type,e.title,e.body,e.created_at
+      FROM fts_event_notifications n JOIN fts_events e ON e.id=n.event_id WHERE n.recipient_id=? ORDER BY e.created_at DESC,e.rowid DESC`).all(user.id) : [];
     return { user: publicUser(user), familyName: this.familyName,
       members: members.map(member => ({ ...publicUser(member), balanceCents: this.balance(member.id) })),
       transactions: rows.map(transactionJSON), notifications: notes.map(note => ({ id: note.id, transactionId: note.transaction_id,
+        title: note.title, body: note.body, createdAt: note.created_at, readAt: note.read_at })),
+      computerNotifications: computerNotes.map(note => ({ id: note.id, issuerId: note.issuer_id, eventType: note.event_type,
         title: note.title, body: note.body, createdAt: note.created_at, readAt: note.read_at })), pushConfigured: this.pushConfigured };
   }
   createTransaction(user, input) {
@@ -348,7 +382,12 @@ export class FamilyStore {
   markRead(user, input) {
     if (!Array.isArray(input.ids) || input.ids.length > 1000 || input.ids.some(id => typeof id !== 'string' || id.length > 80)) fail(400, 'Choose up to 1,000 alerts.');
     const now = new Date().toISOString();
-    this.atomic(() => { for (const id of new Set(input.ids)) this.db.prepare('UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE id=? AND recipient_id=?').run(now, id, user.id); });
+    this.atomic(() => {
+      for (const id of new Set(input.ids)) {
+        this.db.prepare('UPDATE notifications SET read_at=COALESCE(read_at,?) WHERE id=? AND recipient_id=?').run(now, id, user.id);
+        this.db.prepare('UPDATE fts_event_notifications SET read_at=COALESCE(read_at,?) WHERE id=? AND recipient_id=?').run(now, id, user.id);
+      }
+    });
   }
   device(user, input, remove = false) {
     if (typeof input.token !== 'string' || !/^[a-fA-F0-9]{32,256}$/.test(input.token) || input.token.length % 2) fail(400, 'Invalid device token.');

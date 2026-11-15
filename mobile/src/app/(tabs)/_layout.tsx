@@ -1,10 +1,10 @@
 import { NativeTabs } from 'expo-router/native-tabs';
-import { usePocket } from '@/data';
+import { inboxItems, usePocket } from '@/data';
 import { usePalette } from '@/components/pocket-ui';
 export default function TabsLayout() {
   const { state } = usePocket();
   const colors = usePalette();
-  const unread = state?.notifications.filter(item => !item.readAt).length ?? 0;
+  const unread = inboxItems(state).filter(item => !item.readAt).length;
   return <NativeTabs tintColor={colors.accent}>
     <NativeTabs.Trigger name="index"><NativeTabs.Trigger.Label>Balances</NativeTabs.Trigger.Label><NativeTabs.Trigger.Icon sf="wallet.bifold" md="account_balance_wallet" /></NativeTabs.Trigger>
     <NativeTabs.Trigger name="activity"><NativeTabs.Trigger.Label>Activity</NativeTabs.Trigger.Label><NativeTabs.Trigger.Icon sf="arrow.up.arrow.down" md="swap_vert" /></NativeTabs.Trigger>

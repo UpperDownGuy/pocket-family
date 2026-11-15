@@ -1,6 +1,6 @@
 import type { AuthResponse, FamilyState, MemberInput, ServerHealth, SetupInput, TransactionInput } from './models';
 import { parseAuth, parseFamilyState, parseHealth, validateServerURL } from './validation';
-import { parseCreditCode, parseIssuedKey, parseIssuers, parseRedemption, parseRevokedIssuer, parseVoucher } from './credits';
+import { FTS_SERVER_UPDATE_MESSAGE, parseCreditCode, parseIssuedKey, parseIssuers, parseRedemption, parseRevokedIssuer, parseVoucher } from './credits';
 
 export class APIError extends Error {
   readonly status: number;
@@ -52,11 +52,30 @@ export class PocketAPI {
   async redeemCredit(token: string, code: string, childId?: string) {
     return parseRedemption(await this.request('/credits/redeem', { token, body: { code: parseCreditCode(code), ...(childId ? { childId } : {}) } }));
   }
-  async listFTSIssuers(token: string) { return parseIssuers(await this.request('/fts/issuers', { token })); }
-  async createFTSIssuer(token: string, name: string, priceCents: number) { return parseIssuedKey(await this.request('/fts/issuers', { token, body: { name, priceCents } })); }
+  async checkFTSSupport() {
+    const fts = (await this.health()).capabilities?.fts;
+    return fts?.setupCodeDigits === 8 && fts.childCanConnect && fts.parentComputerLog;
+  }
+  async listFTSIssuers(token: string) { return parseIssuers(await this.ftsRequest('/fts/issuers', { token })); }
+  async createFTSIssuer(token: string, name: string, priceCents: number) {
+    const result = await this.ftsRequest('/fts/issuers', { token, body: { name, priceCents } });
+    if (result && typeof result === 'object' && 'token' in result && !('setupCode' in result)) throw new APIError(409, FTS_SERVER_UPDATE_MESSAGE);
+    return parseIssuedKey(result);
+  }
   async revokeFTSIssuer(token: string, id: string) {
     if (!/^[a-zA-Z0-9-]{1,100}$/.test(id)) throw new Error('Choose a valid File Tracker connection.');
-    return parseRevokedIssuer(await this.request(`/fts/issuers/${id}/revoke`, { token, body: {} }));
+    return parseRevokedIssuer(await this.ftsRequest(`/fts/issuers/${id}/revoke`, { token, body: {} }));
+  }
+
+  private async ftsRequest(path: string, input: { token: string; body?: unknown }): Promise<unknown> {
+    try { return await this.request(path, input); }
+    catch (error) {
+      if (error instanceof APIError && ((error.status === 403 && /only (?:a )?parents?|parents? only|parent (?:is )?required/i.test(error.message)) ||
+          (error.status === 404 && path === '/fts/issuers'))) {
+        throw new APIError(409, FTS_SERVER_UPDATE_MESSAGE);
+      }
+      throw error;
+    }
   }
 
   private async request(path: string, { token, body }: { token?: string; body?: unknown } = {}): Promise<unknown> {

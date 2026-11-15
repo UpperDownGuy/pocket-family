@@ -62,7 +62,8 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       const path = new URL(request.url, 'http://localhost').pathname;
       const route = `${request.method} ${path}`;
       let output;
-      if (route === 'GET /health') output = { setupRequired: store.setupRequired, pushConfigured: store.pushConfigured };
+      if (route === 'GET /health') output = { setupRequired: store.setupRequired, pushConfigured: store.pushConfigured,
+        capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true } } };
       else if (route === 'POST /setup' || route === 'POST /login') {
         const input = await body(request);
         limit(request, input);

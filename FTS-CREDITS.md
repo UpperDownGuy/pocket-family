@@ -12,6 +12,10 @@ The Python File Tracking System can issue a QR code for earned report credits. A
 
 The connection authorizes that computer to issue earnings without approving every export. It can issue and check credits, but cannot read family accounts or spend money. Report counts come from that authorized computer. Kids can view and remove their own connections; parents can manage every family connection. Removing a connection in Pocket cancels its unused codes; previously redeemed money stays in the ledger.
 
+Kids do not need parent approval to connect. Every parent gets an Inbox entry when a setup key is created, a computer finishes connecting, or a computer is removed. These entries identify the computer and the person responsible, and do not change balances. Repeated pairing or removal requests do not create duplicate activity. Other children cannot read these parent entries.
+
+Parents can open **Family → File Tracker** to see every family computer, its owner, and whether setup is pending, connected, or removed. **Remove computer** disconnects it and cancels its unused earning codes. Children can manage only their own computers.
+
 ## After scanning
 
 FTS checks the server every three seconds while the desktop app is open. When redemption is confirmed, it removes the displayed QR and saved code and shows **Redeemed**. The image is rendered in memory; no QR PNG is written. Reopening FTS resumes an unclaimed code. An offline computer keeps the code until it can verify the server's status.
@@ -23,6 +27,8 @@ The tracker groups up to 50 reports and $10,000 into a code. Redeem the current 
 ## Server update
 
 If the [one-minute updater](AUTO-UPDATE.md) is installed on WIN-SERVER-1, it will deploy the changed server code after backing up and passing checks. This release adds SQLite tables without removing existing account or ledger data. If the updater has not been installed, follow its installation block on the server first. Do not replace the live checkout with a new clone or discard its local deployment commits.
+
+If Pocket still reports that only parents can connect File Tracker, check the running server, not just the checkout. The updated `/health` response includes `capabilities.fts.childCanConnect: true` and `capabilities.fts.parentComputerLog: true`. See [repairing a stale server](AUTO-UPDATE.md#repair-a-stale-server) if a scheduled task exists but the running API has not updated.
 
 ## Protocol and verification
 

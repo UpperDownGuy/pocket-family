@@ -53,6 +53,7 @@ export function PocketProvider({ children }: PropsWithChildren) {
     previewCredit: controller.previewCredit,
     redeemCredit: controller.redeemCredit,
     listFTSIssuers: controller.listFTSIssuers,
+    checkFTSSupport: controller.checkFTSSupport,
     createFTSIssuer: controller.createFTSIssuer,
     revokeFTSIssuer: controller.revokeFTSIssuer,
     markRead: controller.markRead,

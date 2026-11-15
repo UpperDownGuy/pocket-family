@@ -136,8 +136,8 @@ function Invoke-FakeCommand {
 }
 
 function Run-Update {
-    param([switch]$CheckOnly, [switch]$RetryFailed)
-    return Invoke-PocketUpdate -RepoPath $script:Fixture.Repo -StateDirectory $script:Fixture.State -HealthTimeoutSeconds 1 -CheckOnly:$CheckOnly -RetryFailed:$RetryFailed -Runner { param($request) Invoke-FakeCommand $request }
+    param([switch]$CheckOnly, [switch]$RetryFailed, [switch]$ForceRebuild)
+    return Invoke-PocketUpdate -RepoPath $script:Fixture.Repo -StateDirectory $script:Fixture.State -HealthTimeoutSeconds 1 -CheckOnly:$CheckOnly -RetryFailed:$RetryFailed -ForceRebuild:$ForceRebuild -Runner { param($request) Invoke-FakeCommand $request }
 }
 function Command-Count { param([string]$Purpose) return @($script:Fixture.Calls | Where-Object Purpose -eq $Purpose).Count }
 function Expect-Failure {
@@ -205,15 +205,118 @@ Test-Case 'one-minute repeated checks skip clone and build when source and activ
     Assert-Equal (Command-Count 'BuildCandidate') 0 'No-op rebuilt image'
 }
 
+Test-Case 'a second successful release atomically replaces its saved deployment marker without rollback' {
+    $null = Run-Update
+    $previousImage = $script:Fixture.CurrentImage
+    $script:Fixture.RemoteHead = '6' * 40
+    $script:Fixture.Tree = '7' * 40
+    $script:Fixture.NewImage = 'sha256:' + ('d' * 64)
+    $script:Fixture.Calls.Clear()
+    Assert-Equal (Run-Update).Status 'Pocket API updated and healthy.' 'Replacing an existing success marker failed'
+    Assert-Equal (Command-Count 'RollbackApi') 0 'Successful second release rolled back during state replacement'
+    $saved = Get-Content -Raw -LiteralPath (Join-Path $script:Fixture.State 'last-success.json') | ConvertFrom-Json
+    Assert-Equal $saved.ImageId $script:Fixture.NewImage 'Second release image was not saved'
+    Assert-Equal $saved.UpstreamCommit $script:Fixture.RemoteHead 'Second release revision was not saved'
+    Assert-Equal $saved.ServerTree $script:Fixture.Tree 'Second release source tree was not saved'
+    Assert-Equal $saved.PreviousImageId $previousImage 'Second release lost its rollback image identity'
+    $script:Fixture.Calls.Clear()
+    Assert-Equal (Run-Update).Status 'Already up to date.' 'Second release was not recognized on the next check'
+    Assert-Equal (Command-Count 'BuildCandidate') 0 'Verified second release rebuilt unnecessarily'
+}
+
 Test-Case 'mobile-only upstream changes do not back up, build, deploy or advance success' {
-    $script:Fixture.Tree = $script:Fixture.LiveTree
+    $null = Run-Update
+    $successPath = Join-Path $script:Fixture.State 'last-success.json'
+    $previousState = Get-Content -Raw -LiteralPath $successPath
+    $script:Fixture.RemoteHead = '6' * 40
+    $script:Fixture.Calls.Clear()
     $result = Run-Update
     Assert-Equal $result.Status 'No server changes.' 'Mobile-only changes triggered a deployment'
     Assert-Equal (Command-Count 'Backup') 0 'Mobile-only changes ran backup'
-    Assert-True (-not (Test-Path (Join-Path $script:Fixture.State 'last-success.json'))) 'No-op was recorded as deployment'
+    Assert-Equal (Command-Count 'BuildCandidate') 0 'Mobile-only changes rebuilt image'
+    Assert-Equal (Get-Content -Raw -LiteralPath $successPath) $previousState 'No-op advanced successful deployment state'
     $script:Fixture.Calls.Clear()
     Assert-Equal (Run-Update).Status 'Already checked; no server changes.' 'No-change check cache not reused'
     Assert-Equal (Command-Count 'CloneCandidate') 0 'Mobile-only revision was cloned again'
+}
+
+Test-Case 'first run rebuilds an unmanaged image even when the live checkout already contains latest server source' {
+    $script:Fixture.Tree = $script:Fixture.LiveTree
+    $script:Fixture.RemoteHead = $script:Fixture.LiveHead
+    $result = Run-Update
+    Assert-Equal $result.Status 'Pocket API updated and healthy.' 'Latest checkout was incorrectly treated as a current image'
+    foreach ($purpose in @('Backup','BuildCandidate','TestCandidate','ActivateCandidate')) {
+        Assert-Equal (Command-Count $purpose) 1 'First run skipped a required verified deployment stage'
+    }
+    $saved = Get-Content -Raw -LiteralPath (Join-Path $script:Fixture.State 'last-success.json') | ConvertFrom-Json
+    Assert-Equal $saved.ImageId $script:Fixture.NewImage 'Unmanaged image was recorded as deployed'
+    Assert-Equal $saved.ServerTree $script:Fixture.Tree 'Successful state did not record the actual candidate tree'
+    Assert-Equal $saved.PreviousImageId $script:Fixture.OldImage 'Rollback image identity was lost'
+}
+
+Test-Case 'legacy no-change cache without successful image provenance cannot suppress the initial build' {
+    $script:Fixture.Tree = $script:Fixture.LiveTree
+    $script:Fixture.RemoteHead = $script:Fixture.LiveHead
+    $config = Invoke-FakeCommand ([pscustomobject]@{Purpose='ReadComposeConfig';Arguments=@()})
+    Write-PocketJSONFile (Join-Path $script:Fixture.State 'last-check.json') ([ordered]@{
+        RemoteHead=$script:Fixture.RemoteHead; LiveHead=$script:Fixture.LiveHead;
+        ImageId=$script:Fixture.CurrentImage; ConfigHash=(Get-PocketHash $config.StdOut); ServerTree=$script:Fixture.Tree
+    })
+    $script:Fixture.Calls.Clear()
+    Assert-Equal (Run-Update).Status 'Pocket API updated and healthy.' 'Old no-change cache hid the stale image'
+    Assert-Equal (Command-Count 'CloneCandidate') 1 'First run trusted a source-only cache'
+    Assert-Equal (Command-Count 'BuildCandidate') 1 'First run skipped image build'
+}
+
+Test-Case 'ForceRebuild rebuilds the same successful revision and records the new candidate identity' {
+    $null = Run-Update
+    $previousImage = $script:Fixture.NewImage
+    $script:Fixture.NewImage = 'sha256:' + ('d' * 64)
+    $script:Fixture.Calls.Clear()
+    Assert-Equal (Run-Update -ForceRebuild).Status 'Pocket API updated and healthy.' 'ForceRebuild was skipped by the successful revision cache'
+    foreach ($purpose in @('Backup','BuildCandidate','TestCandidate','ActivateCandidate')) {
+        Assert-Equal (Command-Count $purpose) 1 'ForceRebuild skipped a required deployment check'
+    }
+    $saved = Get-Content -Raw -LiteralPath (Join-Path $script:Fixture.State 'last-success.json') | ConvertFrom-Json
+    Assert-Equal $saved.ImageId $script:Fixture.NewImage 'Rebuilt image identity was not persisted'
+    Assert-Equal $saved.PreviousImageId $previousImage 'Rebuild did not preserve the previous image for rollback'
+}
+
+Test-Case 'ForceRebuild bypasses a managed no-change cache and equal server tree' {
+    $null = Run-Update
+    $script:Fixture.RemoteHead = '6' * 40
+    Assert-Equal (Run-Update).Status 'No server changes.' 'Expected source-only no-op before manual rebuild'
+    $script:Fixture.Calls.Clear()
+    Assert-Equal (Run-Update -ForceRebuild).Status 'Pocket API updated and healthy.' 'No-change cache suppressed manual rebuild'
+    Assert-Equal (Command-Count 'BuildCandidate') 1 'Equal tree suppressed manual rebuild'
+}
+
+Test-Case 'ForceRebuild bypasses failed-revision backoff while preserving backup and tests' {
+    $script:Fixture.Mode = 'build-failure'
+    Expect-Failure { Run-Update } 'BuildCandidate failed'
+    $script:Fixture.Mode = 'normal'
+    $script:Fixture.Calls.Clear()
+    Assert-Equal (Run-Update -ForceRebuild).Status 'Pocket API updated and healthy.' 'Failure backoff suppressed manual rebuild'
+    Assert-Equal (Command-Count 'Backup') 1 'Manual rebuild skipped backup'
+    Assert-Equal (Command-Count 'TestCandidate') 1 'Manual rebuild skipped candidate tests'
+}
+
+foreach ($mode in @('dirty','wrong-volume','backup-failure')) {
+    Test-Case ('ForceRebuild retains protection against ' + $mode) {
+        $script:Fixture.Mode = $mode
+        Expect-Failure { Run-Update -ForceRebuild } '.'
+        Assert-Equal (Command-Count 'BuildCandidate') 0 'Manual rebuild bypassed a required safety check'
+        Assert-Equal (Command-Count 'TagCandidateActive') 0 'Manual rebuild changed active image after failed check'
+    }
+}
+
+Test-Case 'CheckOnly with ForceRebuild still performs no deployment' {
+    $script:Fixture.Tree = $script:Fixture.LiveTree
+    $result = Run-Update -CheckOnly -ForceRebuild
+    Assert-Equal $result.ExitCode 0 'Manual rebuild preview failed'
+    foreach ($purpose in @('Backup','BuildCandidate','TagCandidateActive','ActivateCandidate')) {
+        Assert-Equal (Command-Count $purpose) 0 'CheckOnly plus ForceRebuild changed deployment'
+    }
 }
 
 Test-Case 'CheckOnly validates an isolated merge without backup, build, tagging or activation' {

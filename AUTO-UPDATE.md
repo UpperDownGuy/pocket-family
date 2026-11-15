@@ -7,7 +7,7 @@ This updater is for the existing Docker Desktop Linux deployment on **WIN-SERVER
 - `pocket-data` remains mounted at `/app/data`; `pocket-tls` stays with HTTPS.
 - Source comes from `UpperDownGuy/pocket-family`, branch `main`.
 
-The Windows task checks GitHub **every minute**. Checks do not overlap. It skips unchanged server code and does not restart the API for Expo-only changes.
+The Windows task checks GitHub **every minute**. Checks do not overlap. After its first verified deployment, it skips unchanged server code and does not restart the API for Expo-only changes. The first run builds once when no successful deployment record exists, even if the checkout already contains current source.
 
 ## What happens on an update
 
@@ -43,6 +43,24 @@ if ($LASTEXITCODE -ne 0) { throw 'Updater installation failed.' }
 The installer validates the existing deployment, copies the updater to `%ProgramData%\Pocket\Updater`, and registers **Pocket Server Auto Update**. `-RunNow` starts the first check immediately. Subsequent checks run every minute and after logon. No password is saved in the task.
 
 The task runs under the current logged-in Windows account because Docker Desktop's engine belongs to that user. Keep that account logged in and Docker Desktop running; disconnecting an RDP session is different from signing out.
+
+## Repair a stale server
+
+A running scheduled task does not prove the container is up to date. Earlier updater versions could skip the first build when the checkout was already current, or roll back a later update because Windows PowerShell 5.1 could not replace an existing state file. Both issues are fixed in the current updater. Its installed copy does not update itself.
+
+On **WIN-SERVER-1**, run the installation block above again in elevated PowerShell, **omitting `-RunNow`** from the installer command. This replaces the installed updater and keeps the one-minute schedule. If it reports an update is already running, let that update finish and rerun the block; do not terminate an active deployment.
+
+Then run this in the same window:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$env:ProgramData\Pocket\Updater\Update-PocketServer.ps1" -RepoPath $repo -ForceRebuild
+if ($LASTEXITCODE -ne 0) { throw 'Pocket repair did not complete. The updater reported the reason above.' }
+Invoke-RestMethod -Uri 'https://pocket.alexxweb.com/health' | ConvertTo-Json -Depth 5
+```
+
+`-ForceRebuild` bypasses revision caches and retry delays. It still backs up, preserves local deployment commits and named volumes, tests the candidate, and checks health. Dirty source, merge conflicts, unexpected manual image changes, or failed checks still stop the update. If another update holds the lock, wait for it to finish and rerun this command.
+
+The updated API reports `capabilities.fts.setupCodeDigits: 8`, `childCanConnect: true`, and `parentComputerLog: true`. Once those appear, reload Pocket in Expo Go and refresh **Family → File Tracker**. Kids can create setup keys, and parents can manage every family computer and see computer activity in their Inbox.
 
 ## Check or stop it
 

@@ -64,6 +64,14 @@ function invalidResponse(): never { throw new Error('The server returned an unex
 
 export function parseHealth(value: unknown): ServerHealth {
   if (!record(value) || typeof value.setupRequired !== 'boolean' || typeof value.pushConfigured !== 'boolean') invalidResponse();
+  if (value.capabilities !== undefined) {
+    if (!record(value.capabilities)) invalidResponse();
+    if (value.capabilities.fts !== undefined) {
+      const fts = value.capabilities.fts;
+      if (!record(fts) || !Number.isSafeInteger(fts.setupCodeDigits) || (fts.setupCodeDigits as number) < 1 ||
+          typeof fts.childCanConnect !== 'boolean' || typeof fts.parentComputerLog !== 'boolean') invalidResponse();
+    }
+  }
   return value as unknown as ServerHealth;
 }
 
@@ -85,5 +93,12 @@ export function parseFamilyState(value: unknown): FamilyState {
     if (!record(item) || !strings(item, ['id', 'transactionId', 'title', 'body', 'createdAt']) ||
         (item.readAt !== null && typeof item.readAt !== 'string')) invalidResponse();
   }
-  return value as unknown as FamilyState;
+  const computerNotifications = value.computerNotifications === undefined ? [] : value.computerNotifications;
+  if (!Array.isArray(computerNotifications) || (value.user.role === 'child' && computerNotifications.length > 0)) invalidResponse();
+  for (const item of computerNotifications) {
+    if (!record(item) || !strings(item, ['id', 'issuerId', 'title', 'body', 'createdAt']) ||
+        !['created', 'paired', 'removed'].includes(String(item.eventType)) ||
+        (item.readAt !== null && typeof item.readAt !== 'string')) invalidResponse();
+  }
+  return { ...value, computerNotifications } as unknown as FamilyState;
 }

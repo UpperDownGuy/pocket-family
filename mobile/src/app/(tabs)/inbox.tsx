@@ -2,18 +2,16 @@ import { router } from 'expo-router';
 import { useMemo, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 import { Card, Choice, dateLabel, Empty, GlassButton, Icon, Notice, Screen, Txt, usePalette } from '@/components/pocket-ui';
-import { usePocket } from '@/data';
+import { inboxDestination, inboxItems, usePocket } from '@/data';
 
 export default function InboxScreen() {
   const { state, busy, error, refresh, markRead } = usePocket();
   const colors = usePalette();
   const [filter, setFilter] = useState('all');
   const [refreshing, setRefreshing] = useState(false);
-  const notifications = state?.notifications ?? [];
+  const notifications = useMemo(() => inboxItems(state), [state]);
   const unreadIds = notifications.filter(item => !item.readAt).map(item => item.id);
-  const visible = useMemo(() => (state?.notifications ?? [])
-    .filter(item => filter === 'all' || !item.readAt)
-    .slice().sort((left, right) => right.createdAt.localeCompare(left.createdAt)), [state?.notifications, filter]);
+  const visible = notifications.filter(item => filter === 'all' || !item.readAt);
 
   async function reload() {
     setRefreshing(true);
@@ -39,13 +37,17 @@ export default function InboxScreen() {
         <Card style={{ padding: 0, gap: 0, overflow: 'hidden' }}>
           {visible.map((item, index) => (
             <Pressable
-              key={item.id}
+              key={`${item.category}:${item.id}`}
               accessibilityRole="button"
               accessibilityLabel={`${item.readAt ? '' : 'Unread. '}${item.title}. ${item.body}. ${dateLabel(item.createdAt)}`}
-              onPress={() => router.push({ pathname: '/receipt/[id]', params: { id: item.transactionId } })}
+              onPress={() => {
+                if (item.category === 'computer' && !item.readAt) void markRead([item.id]).catch(() => undefined);
+                router.push(inboxDestination(item));
+              }}
               style={({ pressed }) => [styles.notification, index > 0 && { borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.line }, pressed && { backgroundColor: colors.soft }]}
             >
               <View style={[styles.indicator, { backgroundColor: item.readAt ? 'transparent' : colors.accent }]} />
+              {item.category === 'computer' && <Icon name="computer" size={21} />}
               <View style={styles.message}>
                 <Txt weight={item.readAt ? '500' : '700'}>{item.title}</Txt>
                 <Txt size={14} muted>{item.body}</Txt>
@@ -59,7 +61,7 @@ export default function InboxScreen() {
         <Empty
           icon="inbox"
           title={filter === 'unread' ? 'No unread activity' : 'Your inbox is empty'}
-          detail="Balance changes for you will appear here."
+          detail={state?.user.role === 'parent' ? 'Balance changes and family computer activity will appear here.' : 'Balance changes for you will appear here.'}
         />
       )}
       <Txt size={13} muted>Updates appear here while Pocket is open.</Txt>
