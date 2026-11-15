@@ -43,16 +43,13 @@ async function fixture(t) {
     async reopen() { await app.close(); app = createFamilyServer({ dbPath, setupCode: 'different-code' }); await listen(); } };
 }
 
-test('only parents connect FTS, and scoped tracker keys cannot access family sessions or ledger routes', async t => {
+test('scoped tracker keys cannot access family sessions or ledger routes, and children cannot inspect another account\'s keys', async t => {
   const f = await fixture(t);
   assert.match(f.issuer.token, /^fts_[A-Za-z0-9_-]{43}$/);
   const connected = await f.request('GET', '/fts/connection', undefined, f.issuer.token);
   assert.deepEqual(connected.issuer, f.issuer.issuer);
-  for (const [method, path, body] of [
-    ['POST', '/fts/issuers', { name: 'Unapproved', priceCents: 15 }],
-    ['GET', '/fts/issuers', undefined],
-    ['POST', `/fts/issuers/${f.issuer.issuer.id}/revoke`, {}],
-  ]) assert.equal((await f.request(method, path, body, f.child.token)).httpStatus, 403);
+  assert.deepEqual((await f.request('GET', '/fts/issuers', undefined, f.child.token)).issuers, []);
+  assert.equal((await f.request('POST', `/fts/issuers/${f.issuer.issuer.id}/revoke`, {}, f.child.token)).httpStatus, 404);
   for (const [method, path, body] of [
     ['GET', '/state', undefined], ['POST', '/transactions', {}],
     ['POST', '/members', {}], ['POST', '/credits/redeem', { code: code() }],
@@ -66,6 +63,52 @@ test('only parents connect FTS, and scoped tracker keys cannot access family ses
   assert.equal(JSON.stringify(listed).includes(f.issuer.token), false);
   assert.equal(Object.hasOwn(listed.issuers[0], 'tokenHash'), false);
   assert.notEqual(f.app.store.db.prepare('SELECT token_hash FROM fts_issuers').get().token_hash, f.issuer.token);
+});
+
+test('children create their own connection keys and edit rates, manage only their keys, and earn credits with normal family privacy', async t => {
+  const f = await fixture(t);
+  const own = await f.request('POST', '/fts/issuers', { name: 'My file tracker', priceCents: 23 }, f.child.token);
+  assert.equal(own.httpStatus, 200);
+  assert.match(own.token, /^fts_[A-Za-z0-9_-]{43}$/);
+  assert.equal(own.issuer.priceCents, 23);
+  const siblingIssuer = await f.request('POST', '/fts/issuers', { name: 'Sibling tracker', priceCents: 31 }, f.sibling.token);
+  assert.equal(siblingIssuer.httpStatus, 200);
+  assert.deepEqual((await f.request('GET', '/fts/issuers', undefined, f.child.token)).issuers.map(issuer => issuer.id), [own.issuer.id]);
+  assert.deepEqual((await f.request('GET', '/fts/issuers', undefined, f.sibling.token)).issuers.map(issuer => issuer.id), [siblingIssuer.issuer.id]);
+  assert.equal((await f.request('GET', '/fts/issuers', undefined, f.parent2.token)).issuers.length, 3);
+  assert.equal((await f.request('POST', `/fts/issuers/${own.issuer.id}/revoke`, {}, f.sibling.token)).httpStatus, 404);
+  assert.equal((await f.request('POST', `/fts/issuers/${siblingIssuer.issuer.id}/revoke`, {}, f.child.token)).httpStatus, 404);
+  for (const priceCents of [0, -1, 1.5, '23', true, 1_000_001]) {
+    assert.equal((await f.request('POST', '/fts/issuers', { name: 'Invalid rate', priceCents }, f.child.token)).httpStatus, 400);
+  }
+  const creditCode = code();
+  const issued = await f.mint(creditCode, reports('child-created-key-report', 5, 23), own.token);
+  assert.equal(issued.httpStatus, 200);
+  assert.equal(issued.amountCents, 115);
+  assert.equal((await f.redeem(creditCode, f.child)).status, 'redeemed');
+  assert.equal((await f.status(creditCode, own.token)).status, 'redeemed');
+  for (const who of [f.parent, f.parent2, f.child]) {
+    const state = await f.state(who);
+    assert.equal(state.transactions.length, 1);
+    assert.equal(state.notifications.length, 1);
+    assert.equal(state.transactions[0].amountCents, 115);
+  }
+  assert.equal((await f.state(f.sibling)).transactions.length, 0);
+  assert.equal((await f.state(f.sibling)).notifications.length, 0);
+  // Creating the connection as a child does not bind its QR codes to that child:
+  // the existing parent scanner still chooses the intended recipient.
+  const anotherCode = code();
+  assert.equal((await f.mint(anotherCode, reports('child-key-parent-selection', 1, 23), own.token)).httpStatus, 200);
+  assert.equal((await f.redeem(anotherCode, f.parent, f.sibling.user.id)).status, 'redeemed');
+  assert.equal((await f.state(f.child)).members[0].balanceCents, 115);
+  assert.equal((await f.state(f.sibling)).members[0].balanceCents, 23);
+  const ownRevoked = await f.request('POST', `/fts/issuers/${own.issuer.id}/revoke`, {}, f.child.token);
+  assert.equal(ownRevoked.httpStatus, 200);
+  assert.ok(ownRevoked.issuer.revokedAt);
+  const parentRevoked = await f.request('POST', `/fts/issuers/${siblingIssuer.issuer.id}/revoke`, {}, f.parent2.token);
+  assert.equal(parentRevoked.httpStatus, 200);
+  assert.ok(parentRevoked.issuer.revokedAt);
+  assert.equal((await f.request('GET', '/fts/connection', undefined, siblingIssuer.token)).httpStatus, 403);
 });
 
 test('a child claims immutable earnings once; only that child and parents receive ledger entries and alerts', async t => {

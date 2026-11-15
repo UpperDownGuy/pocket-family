@@ -94,23 +94,28 @@ test('an integration key arriving after sign-out is rejected instead of being ex
   assert.equal(controller.getSnapshot().state, null);
 });
 
-test('a child cannot create integration credentials or target a sibling through controller actions', async () => {
+test('a child can manage their File Tracker connection while sibling redemption and invalid rates remain blocked', async () => {
   let creditCalls = 0;
   const current: FamilyState = { user: child, members: [child], familyName: 'Test', transactions: [], notifications: [], pushConfigured: false };
-  const controller = new PocketController(new Storage(), async url => {
+  const controller = new PocketController(new Storage(), async (url, options) => {
     const path = new URL(url).pathname;
     if (path === '/health') return response({ setupRequired: false, pushConfigured: false });
     if (path === '/login') return response({ token: 'A'.repeat(43), user: child, familyName: 'Test' });
     if (path === '/state') return response(current);
     creditCalls++;
+    if (path === '/fts/issuers') return options.method === 'POST'
+      ? response({ issuer, token: `fts_${'A'.repeat(43)}` }) : response({ issuers: [issuer] });
+    if (path === '/fts/issuers/issuer-1/revoke') return response({ issuer: { ...issuer, revokedAt: '2026-11-15T12:05:00Z' } });
     return response({});
   });
   await controller.initialize(); await controller.signIn('child', 'child-password');
-  await assert.rejects(controller.createFTSIssuer('Desktop', 15), /Only a parent/);
-  await assert.rejects(controller.listFTSIssuers(), /Only a parent/);
-  await assert.rejects(controller.revokeFTSIssuer('issuer-1'), /Only a parent/);
+  assert.equal((await controller.createFTSIssuer('Desktop', 15)).issuer.id, issuer.id);
+  assert.deepEqual(await controller.listFTSIssuers(), [issuer]);
+  assert.ok((await controller.revokeFTSIssuer('issuer-1')).revokedAt);
+  await assert.rejects(controller.createFTSIssuer('Desktop', 0), /Enter a name and a price/);
+  await assert.rejects(controller.createFTSIssuer('Desktop', 1.5), /Enter a name and a price/);
   await assert.rejects(controller.redeemCredit(code, 'sibling-1'), /only redeem earnings for yourself/);
-  assert.equal(creditCalls, 0);
+  assert.equal(creditCalls, 3);
 });
 
 test('real API credits one recipient and parents, deduplicates repeated redemption and supports issuer revocation', async t => {
@@ -127,6 +132,13 @@ test('real API credits one recipient and parents, deduplicates repeated redempti
   const jordan = await api.signIn('jordan', 'child-password');
   const created = await api.createFTSIssuer(owner.token, 'FTS Desktop', 15);
   assert.equal((await api.listFTSIssuers(owner.token))[0].id, created.issuer.id);
+  const childConnection = await api.createFTSIssuer(avery.token, 'Avery Desktop', 25);
+  assert.deepEqual((await api.listFTSIssuers(avery.token)).map(value => value.id), [childConnection.issuer.id]);
+  assert.deepEqual(await api.listFTSIssuers(jordan.token), []);
+  assert.equal((await api.listFTSIssuers(owner.token)).length, 2);
+  await assert.rejects(api.revokeFTSIssuer(jordan.token, childConnection.issuer.id), error => error instanceof APIError && error.status === 404);
+  await assert.rejects(api.revokeFTSIssuer(avery.token, created.issuer.id), error => error instanceof APIError && error.status === 404);
+  assert.ok((await api.revokeFTSIssuer(avery.token, childConnection.issuer.id)).revokedAt);
   async function issue(value: string, id: string) {
     const result = await fetch(`${url}/fts/vouchers`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${created.token}` },
       body: JSON.stringify({ code: value, reports: [{ reportId: id, movieCount: 3, priceCents: 15 }] }) });

@@ -127,7 +127,6 @@ export class FamilyStore {
     });
   }
   createFTSIssuer(user, input) {
-    if (user.role !== 'parent') fail(403, 'Only a parent can connect a file tracker.');
     const name = text(input.name, 'Tracker name', 1, 60);
     if (!Number.isSafeInteger(input.priceCents) || input.priceCents <= 0 || input.priceCents > 1_000_000) fail(400, 'Set an edit price between $0.01 and $10,000.00 in whole cents.');
     const token = 'fts_' + randomBytes(32).toString('base64url');
@@ -136,24 +135,25 @@ export class FamilyStore {
     return { issuer: issuerJSON(row), token };
   }
   listFTSIssuers(user) {
-    if (user.role !== 'parent') fail(403, 'Only a parent can manage file trackers.');
-    return { issuers: this.db.prepare('SELECT * FROM fts_issuers ORDER BY created_at DESC,rowid DESC').all().map(issuerJSON) };
+    const rows = user.role === 'parent'
+      ? this.db.prepare('SELECT * FROM fts_issuers ORDER BY created_at DESC,rowid DESC').all()
+      : this.db.prepare('SELECT * FROM fts_issuers WHERE created_by=? ORDER BY created_at DESC,rowid DESC').all(user.id);
+    return { issuers: rows.map(issuerJSON) };
   }
   revokeFTSIssuer(user, id) {
-    if (user.role !== 'parent') fail(403, 'Only a parent can disconnect a file tracker.');
     return this.atomic(() => {
       const row = this.db.prepare('SELECT * FROM fts_issuers WHERE id=?').get(id);
-      if (!row) fail(404, 'File tracker not found.');
+      if (!row || (user.role !== 'parent' && row.created_by !== user.id)) fail(404, 'File tracker not found.');
       row.revoked_at ||= new Date().toISOString();
       this.db.prepare('UPDATE fts_issuers SET revoked_at=? WHERE id=?').run(row.revoked_at, id);
       return { issuer: issuerJSON(row), revokedAt: row.revoked_at };
     });
   }
   authenticateFTSIssuer(header, { allowRevoked = false } = {}) {
-    if (typeof header !== 'string' || !/^Bearer fts_[A-Za-z0-9_-]{43}$/.test(header)) fail(401, 'Connect FTS with a parent-issued tracker key.');
+    if (typeof header !== 'string' || !/^Bearer fts_[A-Za-z0-9_-]{43}$/.test(header)) fail(401, 'Connect FTS with a Pocket connection key.');
     const row = this.db.prepare('SELECT * FROM fts_issuers WHERE token_hash=?').get(hash(header.slice(7)));
     if (!row) fail(401, 'The file tracker key is invalid. Reconnect it in Pocket.');
-    if (row.revoked_at && !allowRevoked) fail(403, 'This file tracker was disconnected by a parent.');
+    if (row.revoked_at && !allowRevoked) fail(403, 'This file tracker has been disconnected.');
     return row;
   }
   ftsConnection(issuer) { return { issuer: issuerJSON(issuer) }; }
@@ -172,7 +172,7 @@ export class FamilyStore {
       if (seen.has(reportId)) fail(400, 'Include each report ID only once.');
       seen.add(reportId);
       if (!Number.isSafeInteger(report.movieCount) || report.movieCount < 1 || report.movieCount > 1_000_000) fail(400, 'Each report must contain 1–1,000,000 earned edits.');
-      if (!Number.isSafeInteger(report.priceCents) || report.priceCents !== issuer.price_cents) fail(400, 'The report price must match the edit price approved in Pocket.');
+      if (!Number.isSafeInteger(report.priceCents) || report.priceCents !== issuer.price_cents) fail(400, 'The report price must match this connection\'s edit price in Pocket.');
       const earned = report.movieCount * issuer.price_cents;
       amountCents += earned;
       editCount += report.movieCount;
@@ -183,7 +183,7 @@ export class FamilyStore {
     return this.atomic(() => {
       // Re-read inside the transaction so revocation cannot race issuance.
       const current = this.db.prepare('SELECT revoked_at FROM fts_issuers WHERE id=?').get(issuer.id);
-      if (!current || current.revoked_at) fail(403, 'This file tracker was disconnected by a parent.');
+      if (!current || current.revoked_at) fail(403, 'This file tracker has been disconnected.');
       const previous = this.getFTSVoucher(code);
       if (previous) {
         if (previous.issuer_id !== issuer.id || previous.fingerprint !== fingerprint) fail(409, 'This code was already used for different earnings.');
@@ -220,7 +220,7 @@ export class FamilyStore {
         if (row.child_id !== childId) fail(409, 'This credit code has already been redeemed.');
         return { ...voucherJSON(row), replayed: true };
       }
-      if (row.revoked_at) fail(403, 'This file tracker was disconnected by a parent. This code cannot be redeemed.');
+      if (row.revoked_at) fail(403, 'This file tracker has been disconnected. This code cannot be redeemed.');
       const entry = { childId, kind: 'addition', amountCents: row.amount_cents, merchant: 'File edits',
         note: `${row.edit_count} edits · ${row.report_count} ${row.report_count === 1 ? 'report' : 'reports'}`,
         idempotencyKey: 'fts:' + randomUUID(), fingerprint: hash('fts:' + row.code_hash) };

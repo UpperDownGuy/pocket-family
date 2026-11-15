@@ -218,12 +218,10 @@ export class PocketController implements PocketActions {
   });
 
   listFTSIssuers = async () => this.sessionResult(async session => {
-    this.assertParent();
     return session.api.listFTSIssuers(session.token);
   });
 
   createFTSIssuer = async (name: string, priceCents: number) => this.sessionResult(async session => {
-    this.assertParent();
     if (!name.trim() || name.trim().length > 100 || !Number.isSafeInteger(priceCents) || priceCents <= 0 || priceCents > MAX_TRANSACTION_CENTS) {
       throw new Error('Enter a name and a price from $0.01 to $10,000.00.');
     }
@@ -231,13 +229,8 @@ export class PocketController implements PocketActions {
   });
 
   revokeFTSIssuer = async (id: string) => this.sessionResult(async session => {
-    this.assertParent();
     return session.api.revokeFTSIssuer(session.token, id);
   });
-
-  private assertParent(): void {
-    if (this.snapshot.state?.user.role !== 'parent') throw new Error('Only a parent can connect File Tracker.');
-  }
 
   private async sessionResult<T>(action: (session: Session) => Promise<T>): Promise<T> {
     const session = this.session();

@@ -5,12 +5,12 @@ The Python File Tracking System can issue a QR code for earned report credits. A
 ## Connect once
 
 1. Update the Pocket API server and reload the Expo app. The original SwiftUI app does not contain this scanner. Expo Go supports it; standalone installations need the new IPA.
-2. In Pocket, a parent opens **Family → File Tracker**, chooses a name and the allowed price per edit, then creates a connection. Copy the displayed key; it is shown once.
+2. In Pocket, open **Family → File Tracker**, choose a name and the price per edit, then create a connection. Both parents and kids can create keys. Copy the displayed key; it is shown once.
 3. In the updated Python FTS folder, run `python -m pip install -r requirements.txt`.
 4. Open FTS **Settings → Connect Pocket**. Enter the family's HTTPS server address and paste the key. Use the same per-edit price in FTS Budgeting.
 5. Export reports to Excel with budgeting enabled. The **Pocket credits** window opens with a QR. Scan it using **Scan earnings** in Pocket.
 
-The connection authorizes that computer to issue earnings without a parent approving every export. It can issue and check credits, but cannot read family accounts or spend money. Report counts come from that authorized computer. Removing the connection in Pocket cancels its unused codes; previously redeemed money stays in the ledger.
+The connection authorizes that computer to issue earnings without approving every export. It can issue and check credits, but cannot read family accounts or spend money. Report counts come from that authorized computer. Kids can view and remove their own connections; parents can manage every family connection. Removing a connection in Pocket cancels its unused codes; previously redeemed money stays in the ledger.
 
 ## After scanning
 
@@ -28,6 +28,6 @@ If the [one-minute updater](AUTO-UPDATE.md) is installed on WIN-SERVER-1, it wil
 
 QR contents are `pocket://redeem?code=<opaque code>`. They contain no account password, connection key, recipient, amount, or server address. Pocket uses its configured family server, validates the code there, and applies account permissions there.
 
-Parent sessions manage `/fts/issuers`. Scoped tracker keys access `/fts/connection`, `/fts/vouchers`, and `/fts/vouchers/status`. Family sessions preview and redeem through `/credits/preview` and `/credits/redeem`. Requests use JSON and bearer authentication. Tracker keys and QR codes are hashed in the server database; Windows FTS protects its saved key and unclaimed code with DPAPI.
+Family sessions manage `/fts/issuers`, with owner-only access for kids and family-wide access for parents. Scoped tracker keys access `/fts/connection`, `/fts/vouchers`, and `/fts/vouchers/status`. Family sessions preview and redeem through `/credits/preview` and `/credits/redeem`. Requests use JSON and bearer authentication. Tracker keys and QR codes are hashed in the server database; Windows FTS protects its saved key and unclaimed code with DPAPI.
 
 The FTS test suite includes an optional real Python-to-Node integration test. Set `POCKET_TEST_SERVER_DIR` to this repository, then run `python -m unittest discover -s tests` from the FTS folder. It uses a temporary database and local test accounts, never the live family server.

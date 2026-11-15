@@ -19,9 +19,7 @@ function Navigation() {
       <Stack.Screen name="child/[id]" options={{ title: 'Balance' }} />
       <Stack.Screen name="receipt/[id]" options={{ title: 'Details' }} />
       <Stack.Screen name="scan" options={{ title: 'Scan earnings' }} />
-      <Stack.Protected guard={state?.user.role === 'parent'} redirectTo="/(tabs)">
-        <Stack.Screen name="file-tracker" options={{ title: 'File Tracker' }} />
-      </Stack.Protected>
+      <Stack.Screen name="file-tracker" options={{ title: 'File Tracker' }} />
     </Stack.Protected>
     <Stack.Protected guard={!state} redirectTo="/(tabs)"><Stack.Screen name="sign-in" options={{ headerShown: false }} /></Stack.Protected>
     <Stack.Screen name="server" options={{ title: 'Server', presentation: 'modal' }} />
