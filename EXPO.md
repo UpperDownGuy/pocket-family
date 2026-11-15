@@ -1,6 +1,6 @@
 # Pocket with Expo
 
-Pocket's Expo SDK 58 client lives in [`mobile/`](mobile). It uses the same API and SQLite database as the original SwiftUI app. The original [`PocketFamily/`](PocketFamily), [`PocketFamily.xcodeproj`](PocketFamily.xcodeproj), and [`PocketSafari/`](PocketSafari) sources remain available.
+Pocket's Expo SDK 58 client lives in [`mobile/`](mobile). It uses the Pocket API, which keeps each family in its own SQLite database. The original [`PocketFamily/`](PocketFamily), [`PocketFamily.xcodeproj`](PocketFamily.xcodeproj), and [`PocketSafari/`](PocketSafari) sources remain available.
 
 ## Run from Windows without a paid Apple account
 
@@ -15,9 +15,15 @@ npm start
 
 Sign in to Expo Go with the same free Expo account as the CLI and scan the QR code using the iPhone Camera. Keep the terminal running. A Mac and paid Apple Developer membership are not required for this route. [Expo's instructions](https://docs.expo.dev/get-started/start-developing/) cover device connection and account matching.
 
-## Keep your existing family and server
+## Sign in or create a family
 
-Enter your existing Pocket API address in the app, then use your current Pocket username and password. This changes the client, not the accounts or database. Do not delete `data/`, create a replacement database, or run first-family setup to try the Expo app. If a previously configured family appears missing, check the API address and the server's `DB_PATH` before proceeding.
+Open **Server settings** and enter your Pocket API address. To use an existing account, enter the family's eight-digit code, your username, and your password. Every signed-in member can find and copy the code under **Family → Family code**. Keep leading zeros. The code selects the family; it does not create an account or replace the password. Parents add the other members from the Family screen.
+
+To start a separate family on the same server, choose **Create a family** on the sign-in screen. Enter a family name, your name, a username, and a password of at least ten characters. Pocket creates your parent account and signs you in. Your family gets its own code, members, balances, receipts, and Inbox. Different families can use the same usernames.
+
+Creating a family through this screen requires a server advertising `capabilities.families.multiple` and `capabilities.families.registration` in `/health`. Older servers show an update message for additional families; their original first-family setup still uses the server setup code. An older single-family server can sign in with the family-code field blank. Updated servers also retain code-free login for the migrated original family, or for a sole registered family. Use the family code whenever selecting among separate families.
+
+The app remembers the last successfully used family code for each server while it is running. After restarting, get it from another signed-in family member if needed. Switching families clears the previous account's displayed data. Trying Expo does not require deleting `data/`, replacing a database, or running first-family setup. If an existing family appears missing, check the API address and the server's `DB_PATH`.
 
 For a server on your PC, use its LAN IP address, for example `http://192.168.1.20:8787`. The phone and PC must share the network, the API must bind to a reachable address, and the firewall must allow that local connection. `127.0.0.1` on the phone does not reach the PC. Allow Expo Go local network access when prompted. An existing hosted API should keep its HTTPS address.
 
@@ -40,6 +46,8 @@ The UI uses [Expo's native Liquid Glass component](https://docs.expo.dev/version
 ## Safari and custom builds
 
 The config plugin [`mobile/plugins/withPocketSafari.cjs`](mobile/plugins/withPocketSafari.cjs) adds the existing native Safari handler and web extension resources to a generated iOS project. The extension signs in separately as a child, requires enabling each website, and records only recognizable USD confirmation pages with an order reference and clear total. It cannot see every Apple Pay or Stripe Link purchase. Expo Go cannot load this additional native target; [Expo app extensions require a custom build](https://docs.expo.dev/build-reference/app-extensions/).
+
+The existing SwiftUI and Safari sign-in forms do not yet have a family-code field. Their username/password-only login selects the migrated original family, or the only registered family. Use the Expo app for accounts in other families; those native forms need a family-code update before they can select them.
 
 The GitHub workflow [Build Expo iPhone IPA](.github/workflows/build-expo-ios.yml) builds on a hosted Mac. Its `Pocket-Expo-unsigned-IPA` artifact contains `Pocket-Expo-unsigned.ipa`, including the Safari extension. This build requires no EAS or Apple signing credentials, but the output is **unsigned**. It must be signed and provisioned, including its extension, before installation. Developer Mode alone does not install an unsigned IPA. Follow the [Windows signing steps](WINDOWS-INSTALL.md#sign-and-install), selecting `Pocket-Expo-unsigned.ipa` from this workflow instead of the legacy SwiftUI IPA. Device installation still needs verification.
 

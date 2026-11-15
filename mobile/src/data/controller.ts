@@ -1,7 +1,7 @@
 import { APIError, PocketAPI } from './api';
 import type { FetchTransport } from './api';
-import type { AuthResponse, MemberInput, PocketActions, PocketSnapshot, SetupInput, TransactionInput } from './models';
-import { DEFAULT_SERVER_URL, MAX_TRANSACTION_CENTS, validateServerURL } from './validation';
+import type { AuthResponse, FamilyRegistrationInput, MemberInput, PocketActions, PocketSnapshot, SetupInput, TransactionInput } from './models';
+import { DEFAULT_SERVER_URL, FAMILY_UPDATE_MESSAGE, MAX_TRANSACTION_CENTS, parseFamilyCode, validateServerURL } from './validation';
 import { parseCreditCode } from './credits';
 import { transactionPayload } from './payments';
 
@@ -23,6 +23,7 @@ export class PocketController implements PocketActions {
   private snapshot: PocketSnapshot = {
     state: null, serverURL: DEFAULT_SERVER_URL, ready: false, busy: false,
     error: null, setupRequired: false, signedIn: false, pendingTransaction: null,
+    familyRegistrationAvailable: false, multipleFamilies: false, familyCodeHint: '',
   };
   private readonly listeners = new Set<() => void>();
   private readonly storage: SessionStorage;
@@ -35,6 +36,7 @@ export class PocketController implements PocketActions {
   private initialization: Promise<void> | null = null;
   private storageQueue: Promise<unknown> = Promise.resolve();
   private pendingTransactions = new Map<string, TransactionInput>();
+  private familyCodes = new Map<string, string>();
 
   constructor(storage: SessionStorage, transport: FetchTransport) {
     this.storage = storage;
@@ -77,7 +79,9 @@ export class PocketController implements PocketActions {
       try {
         const health = await api.health();
         if (!this.current(expected) || sequence !== this.healthSequence) return;
-        this.update({ setupRequired: health.setupRequired, error: null });
+        this.update({ setupRequired: health.setupRequired, error: null,
+          familyRegistrationAvailable: health.capabilities?.families?.registration === true && health.capabilities.families.multiple,
+          multipleFamilies: health.capabilities?.families?.multiple === true });
       } catch (error) {
         if (!this.current(expected) || sequence !== this.healthSequence) return;
         throw error;
@@ -85,14 +89,32 @@ export class PocketController implements PocketActions {
     }, expected);
   };
 
-  signIn = async (username: string, password: string): Promise<void> => {
+  signIn = async (username: string, password: string, familyCode?: string): Promise<void> => {
+    if (familyCode) parseFamilyCode(familyCode);
     const expected = this.beginSessionChange();
     const api = this.api();
     await this.operation(async () => {
       await this.queueStorage(() => this.storage.removeToken(api.serverURL));
       this.assertGeneration(expected);
-      const response = await api.signIn(username.trim(), password);
+      const response = await api.signIn(username.trim(), password, familyCode);
       await this.accept(response, api, expected);
+    }, expected);
+  };
+
+  createFamily = async (input: FamilyRegistrationInput): Promise<void> => {
+    // Never use /setup as a fallback: it belongs to the older single-family server.
+    const beforeHealth = this.generation;
+    await this.checkServer();
+    this.assertGeneration(beforeHealth);
+    if (!this.snapshot.familyRegistrationAvailable) throw new Error(FAMILY_UPDATE_MESSAGE);
+    const expected = this.beginSessionChange();
+    const api = this.api();
+    await this.operation(async () => {
+      await this.queueStorage(() => this.storage.removeToken(api.serverURL));
+      this.assertGeneration(expected);
+      const response = await api.createFamily(input);
+      await this.accept(response, api, expected);
+      if (this.current(expected)) this.update({ setupRequired: false });
     }, expected);
   };
 
@@ -158,7 +180,7 @@ export class PocketController implements PocketActions {
         if (this.current(expected)) await this.storage.setServerURL(serverURL);
       });
       this.assertGeneration(expected);
-      this.update({ serverURL, setupRequired: false });
+      this.update({ serverURL, setupRequired: false, familyRegistrationAvailable: false, multipleFamilies: false, familyCodeHint: this.familyCodes.get(serverURL) ?? '' });
       const restored = await this.storage.getToken(serverURL);
       this.assertGeneration(expected);
       this.token = restored;
@@ -297,7 +319,8 @@ export class PocketController implements PocketActions {
       throw new SupersededError();
     }
     this.token = response.token;
-    this.update({ signedIn: true });
+    if (response.familyCode) this.familyCodes.set(api.serverURL, response.familyCode);
+    this.update({ signedIn: true, familyCodeHint: response.familyCode ?? '' });
     await this.loadState({ generation: expected, token: response.token, api });
   }
 
@@ -308,7 +331,8 @@ export class PocketController implements PocketActions {
       const state = await session.api.state(session.token);
       this.assertSession(session);
       if (sequence !== this.stateSequence) return;
-      this.update({ state, error: null, pendingTransaction: this.pendingTransactions.get(`${session.api.serverURL}\n${state.user.id}`) ?? null });
+      if (state.familyCode) this.familyCodes.set(session.api.serverURL, state.familyCode);
+      this.update({ state, error: null, familyCodeHint: state.familyCode ?? '', pendingTransaction: this.pendingTransactions.get(`${session.api.serverURL}\n${state.user.id}`) ?? null });
     } catch (error) {
       this.assertSession(session);
       if (sequence !== this.stateSequence) return;

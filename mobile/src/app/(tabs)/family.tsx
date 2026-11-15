@@ -1,4 +1,5 @@
 import Constants, { ExecutionEnvironment } from 'expo-constants';
+import * as Clipboard from 'expo-clipboard';
 import { router } from 'expo-router';
 import { useState } from 'react';
 import { Alert, Platform, Pressable, StyleSheet, View } from 'react-native';
@@ -9,9 +10,19 @@ export default function FamilyScreen() {
   const { state, serverURL, busy, error, refresh, signOut } = usePocket();
   const colors = usePalette();
   const [refreshing, setRefreshing] = useState(false);
+  const [copied, setCopied] = useState('');
+  const [copyError, setCopyError] = useState<string | null>(null);
   const isExpoGo = Constants.executionEnvironment === ExecutionEnvironment.StoreClient && Constants.expoVersion != null;
   const isParent = state?.user.role === 'parent';
   const members = state?.members ?? [];
+  const codeScope = `${serverURL}:${state?.user.id}:${state?.familyCode}`;
+
+  async function copyFamilyCode() {
+    if (!state?.familyCode) return;
+    setCopyError(null);
+    try { await Clipboard.setStringAsync(state.familyCode); setCopied(codeScope); }
+    catch { setCopyError('Could not copy the family code.'); }
+  }
 
   async function reload() {
     setRefreshing(true);
@@ -37,6 +48,12 @@ export default function FamilyScreen() {
           </View>
         </Card>
       ) : null}
+      {state?.familyCode ? <Section title="Family code"><Card>
+        <Txt size={32} weight="600" style={{ fontFamily: Platform.OS === 'ios' ? 'ui-monospace' : 'monospace', letterSpacing: 4, fontVariant: ['tabular-nums'] }}>{state.familyCode}</Txt>
+        <Txt muted size={14}>Use this code with your username and password to sign in to {state.familyName}. It does not create an account or grant access by itself.</Txt>
+        <GlassButton label={copied === codeScope ? 'Copied' : 'Copy family code'} icon={copied === codeScope ? 'check' : 'copy'} onPress={() => void copyFamilyCode()} />
+        <Notice message={copyError} />
+      </Card></Section> : null}
       {isParent ? (
         <Section title="Members">
           <Card style={{ padding: 0, gap: 0, overflow: 'hidden' }}>

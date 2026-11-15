@@ -1,5 +1,5 @@
-import type { AuthResponse, FamilyState, MemberInput, ServerHealth, SetupInput, TransactionInput } from './models';
-import { parseAuth, parseFamilyState, parseHealth, validateServerURL } from './validation';
+import type { AuthResponse, FamilyRegistrationInput, FamilyState, MemberInput, ServerHealth, SetupInput, TransactionInput } from './models';
+import { FAMILY_UPDATE_MESSAGE, parseAuth, parseFamilyCode, parseFamilyState, parseHealth, validateServerURL } from './validation';
 import { FTS_SERVER_UPDATE_MESSAGE, parseCreditCode, parseIssuedKey, parseIssuers, parseRedemption, parseRevokedIssuer, parseVoucher } from './credits';
 import { parseReceiptItems } from './payments';
 
@@ -41,8 +41,18 @@ export class PocketAPI {
 
   async health(): Promise<ServerHealth> { return parseHealth(await this.request('/health')); }
   async state(token: string): Promise<FamilyState> { return parseFamilyState(await this.request('/state', { token })); }
-  async signIn(username: string, password: string): Promise<AuthResponse> {
-    return parseAuth(await this.request('/login', { body: { username, password } }));
+  async signIn(username: string, password: string, familyCode?: string): Promise<AuthResponse> {
+    return parseAuth(await this.request('/login', { body: { username, password, ...(familyCode ? { familyCode: parseFamilyCode(familyCode) } : {}) } }));
+  }
+  async createFamily(input: FamilyRegistrationInput): Promise<AuthResponse> {
+    try {
+      const response = parseAuth(await this.request('/families', { body: input }));
+      parseFamilyCode(response.familyCode);
+      return response;
+    } catch (error) {
+      if (error instanceof APIError && [404, 405].includes(error.status)) throw new APIError(409, FAMILY_UPDATE_MESSAGE);
+      throw error;
+    }
   }
   async setup(input: SetupInput): Promise<AuthResponse> { return parseAuth(await this.request('/setup', { body: input })); }
   async logout(token: string): Promise<void> { await this.request('/logout', { token, body: {} }); }

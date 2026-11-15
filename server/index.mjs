@@ -1,7 +1,7 @@
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
-import { APIError, FamilyStore, fail } from './store.mjs';
+import { APIError, FamilyRegistry, fail } from './store.mjs';
 import { createAPNsProvider } from './apns.mjs';
 
 export function createFTSPairingLimiter(clock = Date.now) {
@@ -21,20 +21,32 @@ export function createFTSPairingLimiter(clock = Date.now) {
 }
 
 export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode, pushProvider = null } = {}) {
-  const store = new FamilyStore(dbPath, { setupCode, pushProvider });
+  const registry = new FamilyRegistry(dbPath, { setupCode, pushProvider });
+  const store = registry.legacyStore;
   const attempts = new Map();
+  const registrations = new Map();
   const limitPairing = createFTSPairingLimiter();
   let closing = false;
   function limit(request, input) {
     const now = Date.now();
     for (const [key, value] of attempts) if (value.until <= now) attempts.delete(key);
     const ip = request.socket.remoteAddress;
-    const keys = [`ip:${ip}`, `name:${String(input.username ?? '').toLowerCase()}`];
+    const keys = [`ip:${ip}`, `name:${String(input.familyCode ?? 'default')}:${String(input.username ?? '').toLowerCase()}`];
     for (const key of keys) {
       const attempt = attempts.get(key) ?? { count: 0, until: now + 60000 };
       attempt.count += 1;
       attempts.set(key, attempt);
       if (attempt.count > (key.startsWith('ip:') ? 30 : 8)) fail(429, 'Too many attempts. Try again in a minute.');
+    }
+  }
+  function limitRegistration(request) {
+    const now = Date.now();
+    for (const [key, value] of registrations) if (value.until <= now) registrations.delete(key);
+    for (const [key, maximum] of [['all', 30], [`ip:${request.socket.remoteAddress}`, 5]]) {
+      const attempt = registrations.get(key) ?? { count: 0, until: now + 10 * 60000 };
+      attempt.count++;
+      registrations.set(key, attempt);
+      if (attempt.count > maximum) fail(429, 'Too many family setup attempts. Try again in ten minutes.');
     }
   }
   async function body(request, maximumBytes = 16384) {
@@ -62,25 +74,30 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       const path = new URL(request.url, 'http://localhost').pathname;
       const route = `${request.method} ${path}`;
       let output;
-      if (route === 'GET /health') output = { setupRequired: store.setupRequired, pushConfigured: store.pushConfigured,
-        capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true } } };
+      if (route === 'GET /health') output = { setupRequired: registry.setupRequired, pushConfigured: registry.pushConfigured,
+        capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true },
+          families: { multiple: true, registration: true } } };
+      else if (route === 'POST /families') {
+        limitRegistration(request);
+        output = registry.create(await body(request));
+      }
       else if (route === 'POST /setup' || route === 'POST /login') {
         const input = await body(request);
         limit(request, input);
-        output = route === 'POST /setup' ? store.setup(input) : store.login(input);
+        output = route === 'POST /setup' ? registry.setup(input) : registry.login(input);
       } else if (route === 'POST /fts/pair') {
         limitPairing(request.socket.remoteAddress);
-        output = store.pairFTSIssuer(await body(request));
+        output = registry.pair(await body(request));
       } else if (route === 'GET /fts/connection' || route === 'POST /fts/vouchers' || route === 'POST /fts/vouchers/status') {
         // Tracker keys can issue and poll credits only. They are deliberately
         // not family sessions and cannot inspect accounts or spend money.
-        const issuer = store.authenticateFTSIssuer(request.headers.authorization, { allowRevoked: route === 'POST /fts/vouchers/status' });
+        const { store, actor: issuer } = registry.authenticated(request.headers.authorization, true, { allowRevoked: route === 'POST /fts/vouchers/status' });
         if (route === 'GET /fts/connection') output = store.ftsConnection(issuer);
         else if (route === 'POST /fts/vouchers') output = store.issueFTSVoucher(issuer, await body(request, 512 * 1024));
         else output = store.ftsVoucherStatus(issuer, await body(request));
       } else {
-        const user = store.authenticate(request.headers.authorization);
-        if (route === 'GET /state') output = store.state(user);
+        const { store, family, actor: user } = registry.authenticated(request.headers.authorization);
+        if (route === 'GET /state') output = registry.withFamily(family, store.state(user));
         else if (route === 'POST /logout') { store.logout(user); output = { ok: true }; }
         else if (route === 'POST /members') {
           if (user.role !== 'parent') fail(403, 'Only a parent can add family members.');
@@ -102,7 +119,7 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
           output = store.browserPurchase(user, await body(request));
           void store.drainOutbox().catch(() => {});
         } else if (route === 'POST /notifications/read') { store.markRead(user, await body(request)); output = { ok: true }; }
-        else if (route === 'POST /devices' || route === 'DELETE /devices') { store.device(user, await body(request), request.method === 'DELETE'); output = { ok: true }; }
+        else if (route === 'POST /devices' || route === 'DELETE /devices') { registry.device(store, user, await body(request), request.method === 'DELETE'); output = { ok: true }; }
         else fail(404, 'Not found.');
       }
       response.writeHead(200);
@@ -114,16 +131,16 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
   });
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
-  const interval = setInterval(() => { if (!closing) void store.drainOutbox().catch(() => {}); }, 5000);
+  const interval = setInterval(() => { if (!closing) void registry.drainOutbox().catch(() => {}); }, 5000);
   interval.unref();
   return {
-    server, store,
+    server, store, registry,
     async close() {
       closing = true;
       clearInterval(interval);
       if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-      while (store.draining) await new Promise(resolve => setTimeout(resolve, 10));
-      store.close();
+      while (registry.allStores().some(store => store.draining)) await new Promise(resolve => setTimeout(resolve, 10));
+      registry.close();
     },
   };
 }
@@ -135,7 +152,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const port = Number(process.env.PORT || 8787);
   app.server.listen(port, host, () => {
     console.log(`Pocket server: http://${host}:${port}`);
-    if (app.store.setupRequired) console.log(`One-time family setup code: ${app.store.setupCode}`);
+    if (app.registry.setupRequired) console.log(`One-time family setup code: ${app.store.setupCode}`);
     console.log(app.store.pushConfigured ? 'Apple sandbox push configured.' : 'In-app alerts enabled. Apple push is not configured.');
   });
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { void app.close().then(() => process.exit(0)); });

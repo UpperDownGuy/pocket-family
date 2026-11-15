@@ -12,6 +12,10 @@ npm start
 
 Open the project in Expo Go on your iPhone, then enter your running family server's address in Pocket. See [Expo setup](EXPO.md) for Windows, account setup, and custom builds with the Safari extension. Your existing server accounts and balances carry over. Expo Go supports the app and Inbox; Safari capture requires a custom build.
 
+Choose **Create a family** on the sign-in screen to create a separate family on the same server. You become its first parent. Add members in **Family** and share the eight-digit **Family code**, plus each person's own username and password. Each family has separate accounts, balances, alerts, and connected computers; family codes identify the family and do not replace passwords.
+
+For an intentional reset of every family on the Windows server, use the [backup and reset procedure](RESET-FAMILIES.md). Installing an update preserves existing families.
+
 The instructions below describe the original SwiftUI build. For the Expo app, use [EXPO.md](EXPO.md).
 
 For the existing Windows Docker deployment, see [automatic server updates](AUTO-UPDATE.md). Its scheduled task checks GitHub every minute, backs up before updating, and preserves the existing deployment configuration and volumes.
@@ -104,4 +108,4 @@ The checks cover server authorization and recipient routing, duplicate purchases
 
 Installation, visual layout, Safari behavior, and push delivery on a physical phone still need device testing. After installing, check one parent and two separate child accounts to confirm that only the parent and the child involved receive each change.
 
-The server stores the family in `server/data/pocket.sqlite`. Keep the data folder when restarting; back it up with the server stopped. Local data, `.env` files, Apple keys, and Xcode user state are excluded from Git.
+The server preserves the original family in `server/data/pocket.sqlite`, stores the family registry in `pocket.sqlite.families.sqlite`, and stores new families under `pocket.sqlite.families/`. Back up the whole data directory with the server stopped, or use the online backup helper described in [server settings](server/README.md). Local data, `.env` files, Apple keys, and Xcode user state are excluded from Git.

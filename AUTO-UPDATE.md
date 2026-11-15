@@ -44,6 +44,14 @@ The installer validates the existing deployment, copies the updater to `%Program
 
 The task runs under the current logged-in Windows account because Docker Desktop's engine belongs to that user. Keep that account logged in and Docker Desktop running; disconnecting an RDP session is different from signing out.
 
+## Backups with multiple families
+
+Rerun the installation block above after upgrading to the version with **Create a family**. The installed updater does not replace itself. This version supplements the existing `deploy\backup.ps1` with SQLite snapshots of the registry and every registered family's database before building a changed API. The helper runs from the candidate source with the current image, so deployment Dockerfiles with explicit file lists remain supported. A failed backup stops the update.
+
+Verified snapshots and their SHA-256 manifest are saved inside `pocket-data` under `/app/data/family-backups/`. These protect against an application update; copy backups off the server separately to protect against loss of the volume or server. The helper captures committed WAL data while the API runs. Do not copy only the original `pocket.sqlite` file: new families live in `pocket.sqlite.families/` and require `pocket.sqlite.families.sqlite` too. Restore a complete snapshot to the same database path with the API stopped.
+
+To intentionally remove every active family after a verified backup, follow [Reset every family](RESET-FAMILIES.md). Resetting is a separate maintenance action and never happens during an update.
+
 ## Repair a stale server
 
 A running scheduled task does not prove the container is up to date. Earlier updater versions could skip the first build when the checkout was already current, or roll back a later update because Windows PowerShell 5.1 could not replace an existing state file. Both issues are fixed in the current updater. Its installed copy does not update itself.

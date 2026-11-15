@@ -50,6 +50,7 @@ export interface ComputerNotification {
 export interface FamilyState {
   user: Member;
   familyName: string;
+  familyCode?: string;
   members: Member[];
   transactions: LedgerTransaction[];
   notifications: InboxNotification[];
@@ -61,13 +62,19 @@ export interface AuthResponse {
   token: string;
   user: Member;
   familyName: string;
+  familyCode?: string;
 }
 
 export interface ServerHealth {
   setupRequired: boolean;
   pushConfigured: boolean;
-  capabilities?: { fts?: { setupCodeDigits: number; childCanConnect: boolean; parentComputerLog: boolean } };
+  capabilities?: {
+    fts?: { setupCodeDigits: number; childCanConnect: boolean; parentComputerLog: boolean };
+    families?: { multiple: boolean; registration: boolean };
+  };
 }
+
+export interface FamilyRegistrationInput { familyName: string; name: string; username: string; password: string }
 
 export interface SetupInput {
   familyName: string;
@@ -118,12 +125,16 @@ export interface PocketSnapshot {
   setupRequired: boolean;
   signedIn: boolean;
   pendingTransaction: TransactionInput | null;
+  familyRegistrationAvailable: boolean;
+  multipleFamilies: boolean;
+  familyCodeHint: string;
 }
 
 export interface PocketActions {
   checkServer(): Promise<void>;
   changeServer(url: string): Promise<void>;
-  signIn(username: string, password: string): Promise<void>;
+  signIn(username: string, password: string, familyCode?: string): Promise<void>;
+  createFamily(input: FamilyRegistrationInput): Promise<void>;
   setup(input: SetupInput): Promise<void>;
   signOut(): Promise<void>;
   addMember(input: MemberInput): Promise<void>;

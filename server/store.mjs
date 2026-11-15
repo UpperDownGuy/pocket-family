@@ -1,7 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomInt, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto';
-import { mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, existsSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 
 export class APIError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -173,7 +173,7 @@ export class FamilyStore {
       let setupCode;
       for (let attempt = 0; attempt < 32; attempt += 1) {
         const candidate = this.generateFTSSetupCode();
-        if (!this.db.prepare('SELECT code_hash FROM fts_pairings WHERE code_hash=?').get(hash(candidate))) { setupCode = candidate; break; }
+        if (!this.db.prepare('SELECT code_hash FROM fts_pairings WHERE code_hash=?').get(hash(candidate)) && !this.isFTSSetupCodeTaken?.(candidate)) { setupCode = candidate; break; }
       }
       if (setupCode === undefined) fail(503, 'Could not create a setup code. Try again.');
       // The initial strong credential is never exposed or usable by the app.
@@ -479,4 +479,147 @@ export class FamilyStore {
     } finally { this.draining = false; }
   }
   close() { this.db.close(); }
+}
+
+const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+
+/** Each family keeps the same proven authorization queries in its own SQLite database. */
+export class FamilyRegistry {
+  constructor(dbPath, options = {}) {
+    this.dbPath = dbPath === ':memory:' ? dbPath : resolve(dbPath);
+    this.registryPath = dbPath === ':memory:' ? ':memory:' : this.dbPath + '.families.sqlite';
+    this.familyDirectory = dbPath === ':memory:' ? null : this.dbPath + '.families';
+    this.options = options;
+    this.stores = new Map();
+    if (this.registryPath !== ':memory:') mkdirSync(dirname(this.registryPath), { recursive: true });
+    this.db = new DatabaseSync(this.registryPath);
+    this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
+      CREATE TABLE IF NOT EXISTS families (id TEXT PRIMARY KEY,family_code TEXT NOT NULL UNIQUE,
+        db_path TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,is_legacy INTEGER NOT NULL CHECK(is_legacy IN (0,1)));
+      CREATE UNIQUE INDEX IF NOT EXISTS one_legacy_family ON families(is_legacy) WHERE is_legacy=1;`);
+    try {
+      const families = this.list();
+      for (const family of families) {
+        if (!uuid.test(family.id) || (family.is_legacy ? family.db_path !== this.dbPath
+          : this.familyDirectory === null || family.db_path !== join(this.familyDirectory, family.id + '.sqlite'))) {
+          throw new Error('The family registry contains an unexpected database path.');
+        }
+        if (!existsSync(family.db_path)) throw new Error('A registered family database is missing. Restore its backup before starting Pocket.');
+      }
+      this.legacyStore = new FamilyStore(this.dbPath, options);
+      this.configureStore(this.legacyStore);
+      for (const family of families) {
+        const store = family.is_legacy ? this.legacyStore : new FamilyStore(family.db_path, options);
+        this.stores.set(family.id, store);
+        if (store.setupRequired) throw new Error('A registered family database is empty. Restore its backup before starting Pocket.');
+        this.configureStore(store);
+      }
+      if (!this.legacyStore.setupRequired && !families.some(family => family.is_legacy)) {
+        this.register(this.legacyStore, this.dbPath, true);
+      }
+    } catch (error) {
+      for (const store of new Set([this.legacyStore, ...this.stores.values()])) if (store) store.close();
+      this.db.close();
+      throw error;
+    }
+  }
+  list() { return this.db.prepare('SELECT * FROM families ORDER BY created_at,id').all(); }
+  get setupRequired() { return this.list().length === 0; }
+  get pushConfigured() { return this.legacyStore.pushConfigured; }
+  allStores() { return [...new Set([this.legacyStore, ...this.stores.values()])]; }
+  configureStore(store) {
+    store.isFTSSetupCodeTaken = code => this.allStores().some(candidate => candidate.db.prepare('SELECT 1 FROM fts_pairings WHERE code_hash=?').get(hash(code)));
+  }
+  generateFamilyCode() { return randomInt(100_000_000).toString().padStart(8, '0'); }
+  availableFamilyCode() {
+    let familyCode;
+    for (let attempt = 0; attempt < 32; attempt++) {
+      const candidate = this.generateFamilyCode();
+      if (!this.db.prepare('SELECT 1 FROM families WHERE family_code=?').get(candidate)) { familyCode = candidate; break; }
+    }
+    if (familyCode === undefined) fail(503, 'Could not create a family code. Try again.');
+    return familyCode;
+  }
+  register(store, dbPath, isLegacy, id = randomUUID(), familyCode = this.availableFamilyCode()) {
+    const family = { id, family_code: familyCode, db_path: dbPath, created_at: new Date().toISOString(), is_legacy: isLegacy ? 1 : 0 };
+    this.db.prepare('INSERT INTO families VALUES (?,?,?,?,?)').run(id, familyCode, dbPath, family.created_at, family.is_legacy);
+    this.stores.set(id, store);
+    return family;
+  }
+  withFamily(family, result) { return { ...result, familyCode: family.family_code }; }
+  setup(input) {
+    if (!this.setupRequired) fail(409, 'A family is already set up. Use Create a family for a separate family.');
+    const familyCode = this.availableFamilyCode();
+    const result = this.legacyStore.setup(input);
+    const family = this.register(this.legacyStore, this.dbPath, true, randomUUID(), familyCode);
+    return this.withFamily(family, result);
+  }
+  create(input) {
+    // Reject malformed public signup before allocating any on-disk database.
+    const valid = { familyName: text(input.familyName, 'Family name', 1, 60), name: text(input.name, 'Name', 1, 60), ...credentials(input) };
+    const familyCode = this.availableFamilyCode();
+    const id = randomUUID();
+    const path = this.familyDirectory === null ? ':memory:' : join(this.familyDirectory, id + '.sqlite');
+    const store = new FamilyStore(path, this.options);
+    this.configureStore(store);
+    try {
+      const result = store.setup({ ...valid, setupCode: store.setupCode });
+      const family = this.register(store, this.familyDirectory === null ? 'memory:' + id : path, false, id, familyCode);
+      return this.withFamily(family, result);
+    } catch (error) {
+      store.close();
+      // Failed registration never publishes an account or a usable session.
+      // Keep any orphaned database for offline maintenance rather than deleting data here.
+      throw error;
+    }
+  }
+  login(input) {
+    const families = this.list();
+    let family;
+    if (input.familyCode !== undefined) {
+      if (typeof input.familyCode !== 'string' || !/^[0-9]{8}$/.test(input.familyCode)) fail(400, 'Enter your eight-digit family code.');
+      family = families.find(candidate => candidate.family_code === input.familyCode);
+      if (!family) fail(401, 'Incorrect family code, username or password.');
+    } else {
+      family = families.find(candidate => candidate.is_legacy) ?? (families.length === 1 ? families[0] : undefined);
+      if (!family) fail(400, families.length ? 'Enter your family code to sign in.' : 'Create a family to get started.');
+    }
+    return this.withFamily(family, this.stores.get(family.id).login(input));
+  }
+  authenticated(header, tracker = false, options = {}) {
+    const pattern = tracker ? /^Bearer fts_[A-Za-z0-9_-]{43}$/ : /^Bearer [A-Za-z0-9_-]{43}$/;
+    if (typeof header !== 'string' || !pattern.test(header)) fail(401, tracker ? 'Connect FTS with a Pocket connection key.' : 'Sign in to continue.');
+    const tokenHash = hash(header.slice(7));
+    const matches = this.list().filter(family => this.stores.get(family.id).db.prepare(tracker
+      ? 'SELECT 1 FROM fts_issuers WHERE token_hash=?' : 'SELECT 1 FROM sessions WHERE hash=?').get(tokenHash));
+    if (matches.length !== 1) fail(401, tracker ? 'The file tracker key is invalid. Reconnect it in Pocket.' : 'Your session has expired. Sign in again.');
+    const family = matches[0];
+    const store = this.stores.get(family.id);
+    const actor = tracker ? store.authenticateFTSIssuer(header, options) : store.authenticate(header);
+    return { family, store, actor };
+  }
+  pair(input) {
+    if (typeof input.setupCode !== 'string' || !/^[0-9]{8}$/.test(input.setupCode)) fail(400, 'Enter the eight-digit setup code from Pocket.');
+    if (typeof input.credential !== 'string' || !/^fts_[A-Za-z0-9_-]{43}$/.test(input.credential)) fail(400, 'FTS must provide a valid connection credential.');
+    const codeHash = hash(input.setupCode);
+    const matches = [...this.stores.values()].filter(store => store.db.prepare('SELECT 1 FROM fts_pairings WHERE code_hash=?').get(codeHash));
+    if (matches.length !== 1) fail(400, 'That setup code is invalid. Generate a new one in Pocket.');
+    const store = matches[0];
+    const credentialHash = hash(input.credential);
+    if (this.allStores().some(other => other !== store && other.db.prepare('SELECT 1 FROM fts_issuers WHERE token_hash=?').get(credentialHash))) {
+      fail(409, 'Use a fresh FTS connection credential for this setup code.');
+    }
+    return store.pairFTSIssuer(input);
+  }
+  device(store, user, input, remove = false) {
+    if (typeof input.token !== 'string' || !/^[a-fA-F0-9]{32,256}$/.test(input.token) || input.token.length % 2) fail(400, 'Invalid device token.');
+    const token = input.token.toLowerCase();
+    if (!remove) for (const other of this.allStores()) if (other !== store) other.atomic(() => {
+      other.db.prepare("UPDATE outbox SET status='cancelled' WHERE device_token=? AND status='pending'").run(token);
+      other.db.prepare('DELETE FROM devices WHERE token=?').run(token);
+    });
+    store.device(user, input, remove);
+  }
+  async drainOutbox() { await Promise.all(this.allStores().map(store => store.drainOutbox())); }
+  close() { for (const store of this.allStores()) store.close(); this.db.close(); }
 }

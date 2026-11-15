@@ -295,6 +295,25 @@ function Invoke-PocketBackup {
     Write-PocketLog $Context 'The existing backup script exited successfully. Its output was not copied into updater logs.'
 }
 
+function Invoke-PocketFamilyBackup {
+    param($Context, $Before, [string]$CandidateServer)
+    $helper = Join-Path $CandidateServer 'backup-families.mjs'
+    # Older upstream revisions predate the family registry and need only the
+    # existing deployment backup. New revisions always supply this helper.
+    if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { return }
+    if ($helper.Contains(',')) { throw 'The backup helper path cannot contain a comma.' }
+    $script = "const p=require('node:path').resolve(process.env.DB_PATH||'./data/pocket.sqlite');if(!/^\/app\/data\/[A-Za-z0-9][A-Za-z0-9._-]*\.sqlite$/.test(p))process.exit(1);process.stdout.write(p);"
+    $dbPath = (Invoke-PocketCommand $Context 'ReadBackupDatabasePath' 'docker.exe' @('exec', $Before.ApiId, 'node', '-e', $script)).Trim()
+    if ($dbPath -cnotmatch '^/app/data/[A-Za-z0-9][A-Za-z0-9._-]*\.sqlite$') { throw 'The running API database must be inside pocket-data at /app/data.' }
+    $arguments = @('run', '--rm', '--network', 'none', '--read-only', '--tmpfs', '/tmp:rw,noexec,nosuid,size=64m,mode=1777',
+        '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
+        '--mount', 'type=volume,src=pocket-data,dst=/app/data',
+        '--mount', ('type=bind,src=' + $helper + ',dst=/maintenance/backup-families.mjs,readonly'),
+        '--entrypoint', 'node', $Before.ImageId, '/maintenance/backup-families.mjs', '--db-path', $dbPath)
+    $null = Invoke-PocketCommand $Context 'BackupFamilies' 'docker.exe' $arguments 600
+    Write-PocketLog $Context 'All registered family databases passed SQLite backup verification in pocket-data/family-backups.'
+}
+
 function Remove-PocketCandidate {
     param($Context, [string]$RunPath)
     if (-not $RunPath -or -not (Test-Path -LiteralPath $RunPath)) { return }
@@ -450,6 +469,7 @@ function Invoke-PocketUpdate {
         }
         Assert-PocketLiveSource $context $liveHead $config.Hash
         Invoke-PocketBackup $context
+        Invoke-PocketFamilyBackup $context $before $candidateServer
         Assert-PocketLiveSource $context $liveHead $config.Hash
         Assert-PocketSnapshot $before (Get-PocketSnapshot $context) $before.ImageId
         $candidateTag = 'pocket-api-candidate:' + $serverTree.Substring(0, 12) + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)

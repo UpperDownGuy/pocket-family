@@ -1,6 +1,6 @@
 # Pocket server
 
-Private development API for the Pocket iPhone app. Node.js **22.13 or newer**; no npm dependencies.
+Development API for separate families using the Pocket iPhone app. Node.js **22.13 or newer**; no npm dependencies.
 
 ## Run
 
@@ -11,7 +11,9 @@ npm start
 
 The default address is `http://127.0.0.1:8787`. On a Mac, start the server from this directory with the same command. Node 22 may print an experimental SQLite warning.
 
-On first launch the terminal prints a random **one-time family setup code**. Enter it in the iPhone's Create family screen, along with the first parent's credentials. It is not stored in the database and changes after an unconfigured server restarts. After setup, that endpoint cannot create another family. Keep the code private. An optional `SETUP_CODE` environment variable supplies a fixed code for setup.
+Use **Create a family** in the Expo app to register a separate family and its first parent. Registration returns a permanent eight-digit **family code**. Family members use that code with their own username and password to sign in; usernames can be reused in other families. The family code selects a family and does not replace a password. Public registration is limited to five attempts per connection IP and thirty server-wide in ten minutes.
+
+The original `POST /setup` route remains available only while no families are registered. It still requires the one-time server setup code printed on first launch, or `SETUP_CODE` when configured. It is retained for older clients; the Expo app's public registration does not need this server code. Existing configured databases receive a stable family code automatically, and their current sessions and File Tracker credentials remain valid. Login without a family code chooses the existing legacy family, or the sole registered family when no legacy family exists; otherwise the code is required. Older native/Safari clients that cannot enter a family code remain limited to that default-family login behavior.
 
 Parents create additional parents and children in the app. Each person signs in with their own username and password. Passwords require at least ten characters. All balances start at zero. Add an opening balance as a parent.
 
@@ -23,10 +25,20 @@ Settings:
 |---|---|---|
 | `HOST` | `127.0.0.1` | Bind address; loopback unless deliberately changed |
 | `PORT` | `8787` | HTTP port |
-| `DB_PATH` | `./data/pocket.sqlite` | Persistent SQLite file, relative to working directory |
-| `SETUP_CODE` | Random per unconfigured startup | First-family creation code |
+| `DB_PATH` | `./data/pocket.sqlite` | Legacy database and base path for the family registry/databases |
+| `SETUP_CODE` | Random per unconfigured startup | Legacy `/setup` code; not required by `/families` |
 
-The SQLite database contains family identities, hashed passwords, hashed sessions, the ledger, notifications and push delivery state. It is ignored by Git. Back up `data/` with the server stopped. Do not delete it to restart the server; deletion resets the family.
+Each family has a separate SQLite database containing its accounts, hashed passwords and sessions, ledger, notifications, File Tracker records, and push delivery state. The server routes opaque session or computer credentials to exactly one family before running its existing authorization checks; parents only manage their own family. File Tracker setup codes are unique across families, and a computer credential cannot be paired to another family.
+
+For `DB_PATH=/app/data/pocket.sqlite`, storage is:
+
+- `/app/data/pocket.sqlite`: original family database, retained for compatibility.
+- `/app/data/pocket.sqlite.families.sqlite`: registry containing family codes and database paths.
+- `/app/data/pocket.sqlite.families/<family UUID>.sqlite`: each newly registered family's database.
+
+All SQLite WAL/SHM sidecars belong to the same backup set. Back up the entire set with the supplied multi-family backup helper, or copy the complete data directory with the API stopped. Restoring only the legacy file will not restore additional families. Missing or unexpected registered database paths stop startup instead of silently creating an empty family. The API does not wipe data at startup and exposes no public family-deletion endpoint; the separate offline maintenance command handles an explicit administrator reset.
+
+To make an online backup, run `node backup-families.mjs --db-path /absolute/path/pocket.sqlite`. Verified database copies and a manifest are written beneath `family-backups` beside the configured database. Docker installations with an explicit file list in `COPY` must bind-mount the helper script into the API container; the updated updater does this automatically. See [automatic updates and backups](../AUTO-UPDATE.md) and [the offline family reset procedure](../RESET-FAMILIES.md).
 
 ## Alerts
 
@@ -43,7 +55,7 @@ APNS_KEY_PATH=/absolute/private/path/AuthKey_YOUR_KEY_ID.p8
 
 `APNS_TOPIC` must exactly match the installed app's bundle ID. Keep the `.p8` key outside the repository. This server uses **`api.sandbox.push.apple.com`**, for development builds; TestFlight and App Store push use a different environment and are not supported by this development configuration.
 
-With no APNs configuration, the inbox still works; background device pushes are unavailable. With credentials set, only registered recipient devices get a generic lock-screen message: “Your balance activity has changed.” Details remain inside the authenticated app. A durable outbox retries transient delivery failures up to six times with increasing delay. APNs acceptance does not guarantee presentation on a phone. Failed deliveries stay recorded in the local `outbox` table; they do not undo the balance or inbox entry. Re-registering a device under a different user cancels stale pending deliveries. Logging out revokes that session and unregisters its devices.
+With no APNs configuration, the inbox still works; background device pushes are unavailable. With credentials set, only registered recipient devices get a generic lock-screen message: “Your balance activity has changed.” Details remain inside the authenticated app. A durable outbox retries transient delivery failures up to six times with increasing delay. APNs acceptance does not guarantee presentation on a phone. Failed deliveries stay recorded in the local `outbox` table; they do not undo the balance or inbox entry. Re-registering a device under a different user or family cancels stale pending deliveries and removes its old family binding before registering the new one. Logging out revokes that session and unregisters its devices.
 
 ## Browser receipt capture
 
@@ -70,11 +82,12 @@ All routes below use JSON. There is no `/api` prefix. Errors return `{ "error": 
 
 | Method / path | Access | Result |
 |---|---|---|
-| `GET /health` | Public | `setupRequired`, `pushConfigured`, `capabilities.fts` (including `itemLists`) |
-| `POST /setup` | One-time setup code | `token`, `user`, `familyName` |
-| `POST /login` | Username/password | `token`, `user`, `familyName` |
+| `GET /health` | Public | `setupRequired`, `pushConfigured`, `capabilities.fts`, `capabilities.families:{multiple:true,registration:true}`; no family directory |
+| `POST /families` | Public, rate limited | Creates a family from `{familyName,name,username,password}`; returns `token`, `user`, `familyName`, `familyCode` |
+| `POST /setup` | One-time setup code; registry empty | Legacy family setup; returns `token`, `user`, `familyName`, `familyCode` |
+| `POST /login` | Username/password and optional `familyCode` | Returns `token`, `user`, `familyName`, `familyCode` |
 | `POST /logout` | Signed in | Revokes current session and its device registrations |
-| `GET /state` | Signed in | Scoped `user`, `familyName`, `members`, `transactions`, `notifications`, `pushConfigured` |
+| `GET /state` | Signed in | Scoped `user`, `familyName`, `familyCode`, `members`, `transactions`, `notifications`, `computerNotifications`, `pushConfigured` |
 | `POST /members` | Parent | Adds `{name,username,password,role}`; returns `member` |
 | `POST /transactions` | Parent; child limited to self/purchase | Adds entry; returns `transaction`, `replayed` |
 | `GET /transactions/:id/items` | Parent or transaction's child | `{items,totalCount,omittedCount}` for an FTS receipt; unknown or unauthorized IDs return 404 |
@@ -95,4 +108,4 @@ Receipt items are stored atomically with their voucher, and normalized details p
 npm test
 ```
 
-The tests create and delete temporary databases. They cover recipient routing, sibling privacy, privilege checks, whole-cent money, idempotency, simultaneous purchases, negative balances, purchases before an opening balance, atomic inbox creation, persistence, read state, authentication, browser receipt validation, and mock push delivery. They never contact Apple or send real notifications.
+The tests create and delete temporary databases. They cover separate families with reused usernames, family codes, legacy upgrades, credential routing, global computer pairing, cross-family device transfers, receipt privacy, recipient routing, sibling privacy, privilege checks, whole-cent money, idempotency, simultaneous purchases, negative balances, purchases before an opening balance, atomic inbox creation, persistence, read state, authentication, browser receipt validation, and mock push delivery. They never contact Apple or send real notifications.

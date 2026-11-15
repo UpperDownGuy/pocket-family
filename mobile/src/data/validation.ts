@@ -2,6 +2,12 @@ import type { AuthResponse, FamilyState, Member, ServerHealth } from './models';
 
 export const DEFAULT_SERVER_URL = 'http://127.0.0.1:8787';
 export const MAX_TRANSACTION_CENTS = 1_000_000;
+export const FAMILY_UPDATE_MESSAGE = 'Update the Pocket server to create separate families. Your existing family will stay unchanged.';
+
+export function parseFamilyCode(value: unknown): string {
+  if (typeof value !== 'string' || !/^[0-9]{8}$/.test(value)) throw new Error('Enter the eight-digit family code, including any leading zero.');
+  return value;
+}
 
 export function validateServerURL(value: string): string {
   const invalid = () => new Error('Use an HTTPS server address, or an HTTP address on your local network.');
@@ -71,6 +77,10 @@ export function parseHealth(value: unknown): ServerHealth {
       if (!record(fts) || !Number.isSafeInteger(fts.setupCodeDigits) || (fts.setupCodeDigits as number) < 1 ||
           typeof fts.childCanConnect !== 'boolean' || typeof fts.parentComputerLog !== 'boolean') invalidResponse();
     }
+    if (value.capabilities.families !== undefined) {
+      const families = value.capabilities.families;
+      if (!record(families) || typeof families.multiple !== 'boolean' || typeof families.registration !== 'boolean') invalidResponse();
+    }
   }
   return value as unknown as ServerHealth;
 }
@@ -78,12 +88,14 @@ export function parseHealth(value: unknown): ServerHealth {
 export function parseAuth(value: unknown): AuthResponse {
   if (!record(value) || !strings(value, ['token', 'familyName']) || !member(value.user) ||
       !/^[A-Za-z0-9_-]{43}$/.test(value.token as string)) invalidResponse();
+  if (value.familyCode !== undefined) parseFamilyCode(value.familyCode);
   return value as unknown as AuthResponse;
 }
 
 export function parseFamilyState(value: unknown): FamilyState {
   if (!record(value) || !member(value.user) || typeof value.familyName !== 'string' || typeof value.pushConfigured !== 'boolean' ||
       !Array.isArray(value.members) || !value.members.every(member) || !Array.isArray(value.transactions) || !Array.isArray(value.notifications)) invalidResponse();
+  if (value.familyCode !== undefined) parseFamilyCode(value.familyCode);
   for (const item of value.transactions) {
     if (!record(item) || !strings(item, ['id', 'childId', 'childName', 'merchant', 'note', 'createdAt']) ||
         (item.kind !== 'purchase' && item.kind !== 'addition') || !Number.isSafeInteger(item.amountCents) ||

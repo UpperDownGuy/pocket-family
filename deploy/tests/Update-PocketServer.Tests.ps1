@@ -90,6 +90,7 @@ function Invoke-FakeCommand {
             $null = New-Item -ItemType Directory -Path (Join-Path $f.Candidate 'server\tests') -Force
             Set-Content -LiteralPath (Join-Path $f.Candidate 'server\Dockerfile') -Value 'FROM node:22'
             Set-Content -LiteralPath (Join-Path $f.Candidate 'server\tests\server.test.mjs') -Value '// Test fixture only.'
+            Set-Content -LiteralPath (Join-Path $f.Candidate 'server\backup-families.mjs') -Value '// Backup fixture only.'
             Assert-True (-not (Test-Path (Join-Path $f.Candidate '.env'))) 'Live secret copied into candidate.'
         }
         'CheckoutCandidate' { }
@@ -101,6 +102,14 @@ function Invoke-FakeCommand {
         'ReadCandidateTree' { $out = $f.Tree }
         'ReadLiveTree' { $out = $f.LiveTree }
         'Backup' { if ($f.Mode -eq 'backup-failure') { $exitCode = 1 } }
+        'ReadBackupDatabasePath' { $out = '/app/data/pocket.sqlite'; if ($f.Mode -eq 'backup-wrong-path') { $out = '/private/other.sqlite' } }
+        'BackupFamilies' {
+            Assert-True ($Request.Arguments -contains 'type=volume,src=pocket-data,dst=/app/data') 'Family backup must use the existing data volume'
+            Assert-True ($Request.Arguments -contains $f.CurrentImage) 'Family backup must run the current image'
+            Assert-True (($Request.Arguments -join ' ').Contains('dst=/maintenance/backup-families.mjs,readonly')) 'Backup helper must be mounted read-only'
+            Assert-True (-not ($Request.Arguments -contains '--env-file')) 'Backup must not copy credentials'
+            if ($f.Mode -eq 'family-backup-failure') { $exitCode = 1 }
+        }
         'BuildCandidate' {
             $override = @($Request.Arguments | Where-Object { $_ -like '*candidate-build.json' })[0]
             $config = Get-Content -Raw -LiteralPath $override | ConvertFrom-Json
@@ -179,7 +188,7 @@ Test-Case 'successful update backs up, builds and tests before touching active t
     $result = Run-Update
     Assert-Equal $result.ExitCode 0 'Update failed'
     $purposes = @($script:Fixture.Calls | ForEach-Object Purpose)
-    foreach ($pair in @(@('Backup','BuildCandidate'), @('BuildCandidate','TestCandidate'), @('TestCandidate','TagCandidateActive'), @('TagCandidateActive','ActivateCandidate'))) {
+    foreach ($pair in @(@('Backup','BackupFamilies'), @('BackupFamilies','BuildCandidate'), @('BuildCandidate','TestCandidate'), @('TestCandidate','TagCandidateActive'), @('TagCandidateActive','ActivateCandidate'))) {
         Assert-True ([array]::IndexOf($purposes,$pair[0]) -lt [array]::IndexOf($purposes,$pair[1])) 'Update operation order is unsafe'
     }
     Assert-True ([array]::IndexOf($purposes,'ValidateNginx') -lt [array]::IndexOf($purposes,'Backup')) 'Proxy preflight must precede deployment changes'
@@ -301,7 +310,7 @@ Test-Case 'ForceRebuild bypasses failed-revision backoff while preserving backup
     Assert-Equal (Command-Count 'TestCandidate') 1 'Manual rebuild skipped candidate tests'
 }
 
-foreach ($mode in @('dirty','wrong-volume','backup-failure')) {
+foreach ($mode in @('dirty','wrong-volume','backup-failure','family-backup-failure','backup-wrong-path')) {
     Test-Case ('ForceRebuild retains protection against ' + $mode) {
         $script:Fixture.Mode = $mode
         Expect-Failure { Run-Update -ForceRebuild } '.'
