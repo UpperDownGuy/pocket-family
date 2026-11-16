@@ -33,6 +33,14 @@ For a server on your PC, use its LAN IP address, for example `http://192.168.1.2
 
 ## Features and limits
 
+Open **Subscriptions** from Balances, a child's balance, or Family to record a weekly, monthly, or yearly Pocket deduction. Parents first choose a child, then see that child's subscription list in a separate screen; kids open their own list directly. Choose a price, first charge date, and billing time zone. A date of today charges immediately; future charges run on the server even when the app is closed. Charges can take the child's balance below zero, and only the parents and that child receive the Inbox entry.
+
+Pause stops future charges. Resume skips the paused dates and uses the next scheduled date after today. Editing changes future charges; deleting stops the schedule while keeping past charges in history. These records do not pay or cancel subscriptions with a store. The server must advertise `capabilities.subscriptions: true`. A lost connection leaves an unconfirmed setup or update available to retry with its original request key while the app is running.
+
+In the updated installed iPhone app, open **Subscriptions → Apple Reminders → Connect Apple Reminders** and allow Reminders access. Pocket creates a dedicated list for the signed-in account: parents include all their kids, and children include only themselves. A confirmed server charge checks off that billing period and adds the next one. Manually checking a reminder does not charge or change the Pocket balance. Only Pocket-owned reminders in that dedicated list are synced.
+
+Reminders sync runs while Pocket is open and on return to the app; it cannot promise updates at the exact billing moment while closed. **Sync now** shows the last sync or a connection error. **Turn off sync** preserves the existing list and history and does not pause Pocket charges. Changing account or server stops the old account's sync. Expo Go cannot use this integration: install a newly built and signed Pocket app. The server also needs `capabilities.subscriptionReminders: true`. Pocket requests Reminders access, not Calendar access.
+
 | Feature | Expo Go | Custom native build |
 | --- | --- | --- |
 | Family accounts, balances, additions, purchases | Available | Available |

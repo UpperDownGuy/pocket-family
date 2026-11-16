@@ -91,6 +91,7 @@ export default function FamilyScreen() {
           <GlassButton label="Add member" icon="plus" onPress={() => router.push('/member')} />
         </Section>
       ) : null}
+      <Card><Row icon="repeat" title="Subscriptions" detail={isParent ? 'Manage your family’s recurring balance deductions.' : 'Manage your recurring balance deductions.'} onPress={() => router.push('/subscriptions')} /></Card>
       <Section title="Connection">
         <Card><Row icon="server" title="Server" detail={serverURL} onPress={() => router.push('/server')} /></Card>
         <Card><Row icon="computer" title="File Tracker" detail={isParent ? 'View and remove family computers, or connect a new one.' : 'Connect your computer to issue earnings codes.'} onPress={() => router.push('/file-tracker')} /></Card>
@@ -108,6 +109,7 @@ export default function FamilyScreen() {
         </Card>
       </Section>
       <Section title="Notifications">
+        <Card><Row icon="reminders" title="Apple Reminders" detail="Sync subscription dates to your own Reminders list." onPress={() => router.push('/reminders')} /></Card>
         <Card><Row icon="inbox" title="In-app inbox" detail="Parents and the child involved receive each balance change. Open Pocket to see updates." onPress={() => router.push('/(tabs)/inbox')} /></Card>
         {isParent && <Txt size={13} muted>Computer setup, connection, and removal are also logged in the parents’ Inbox.</Txt>}
         <Txt size={13} muted>Background phone alerts are not enabled in this app.</Txt>

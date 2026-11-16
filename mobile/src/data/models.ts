@@ -28,6 +28,21 @@ export interface ReceiptItem {
 }
 export interface ReceiptItems { items: ReceiptItem[]; totalCount: number; omittedCount: number }
 
+export type SubscriptionInterval = 'weekly' | 'monthly' | 'yearly';
+export interface SubscriptionFields {
+  childId: string; name: string; amountCents: number; interval: SubscriptionInterval;
+  nextChargeDate: string; timeZone: string;
+}
+export interface Subscription extends SubscriptionFields {
+  id: string; paused: boolean; createdAt: string; updatedAt: string;
+}
+export interface SubscriptionInput extends SubscriptionFields { idempotencyKey: string }
+export type SubscriptionPatch = Partial<Omit<SubscriptionFields, 'childId'> & { paused: boolean; idempotencyKey: string }>;
+export interface PendingSubscriptionUpdate { id: string; patch: SubscriptionPatch }
+export interface SubscriptionCharge { subscriptionId: string; periodDate: string; transactionId: string; childId: string; createdAt: string }
+export interface SubscriptionSync { subscriptions: Subscription[]; charges: SubscriptionCharge[] }
+export type SubscriptionSyncFeed = SubscriptionSync;
+
 export interface InboxNotification {
   id: string;
   transactionId: string;
@@ -69,6 +84,8 @@ export interface ServerHealth {
   setupRequired: boolean;
   pushConfigured: boolean;
   capabilities?: {
+    subscriptions?: boolean;
+    subscriptionReminders?: boolean;
     fts?: { setupCodeDigits: number; childCanConnect: boolean; parentComputerLog: boolean };
     families?: { multiple: boolean; registration: boolean; deletion?: boolean };
   };
@@ -127,6 +144,8 @@ export interface PocketSnapshot {
   setupRequired: boolean;
   signedIn: boolean;
   pendingTransaction: TransactionInput | null;
+  pendingSubscription: SubscriptionInput | null;
+  pendingSubscriptionUpdate: PendingSubscriptionUpdate | null;
   familyRegistrationAvailable: boolean;
   multipleFamilies: boolean;
   familyCodeHint: string;
@@ -143,6 +162,11 @@ export interface PocketActions {
   addMember(input: MemberInput): Promise<void>;
   recordTransaction(input: TransactionInput): Promise<void>;
   transactionItems(id: string): Promise<ReceiptItems | null>;
+  listSubscriptions(): Promise<Subscription[]>;
+  subscriptionSync(): Promise<SubscriptionSync>;
+  createSubscription(input: SubscriptionInput): Promise<Subscription>;
+  updateSubscription(id: string, patch: SubscriptionPatch): Promise<Subscription>;
+  deleteSubscription(id: string): Promise<void>;
   previewCredit(code: string): Promise<CreditVoucher>;
   redeemCredit(code: string, childId?: string): Promise<CreditRedemption>;
   listFTSIssuers(): Promise<FTSIssuer[]>;

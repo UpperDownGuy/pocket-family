@@ -105,6 +105,14 @@ xcodebuild \
 APP="$WORK_DIR/DerivedData/Build/Products/Release-iphoneos/Pocket.app"
 test -d "$APP/PlugIns/PocketSafari.appex"
 test -s "$APP/main.jsbundle"
+python3 - "$APP/Info.plist" <<'PY'
+import plistlib, sys
+with open(sys.argv[1], 'rb') as stream:
+    plist = plistlib.load(stream)
+for key in ('NSRemindersUsageDescription', 'NSRemindersFullAccessUsageDescription'):
+    assert 'subscription' in plist.get(key, '').lower(), f'Missing Reminders permission: {key}'
+assert not any(key.startswith('NSCalendars') for key in plist), 'Pocket must request Reminders access only'
+PY
 mkdir -p "$WORK_DIR/package/Payload"
 /usr/bin/ditto "$APP" "$WORK_DIR/package/Payload/Pocket.app"
 (
@@ -133,6 +141,7 @@ metadata = {
     'app': 'Pocket', 'implementation': 'Expo', 'signed': False,
     'platform': 'iphoneos', 'architecture': 'arm64', 'configuration': 'Release',
     'includesSafariExtension': True, 'includesJavaScriptBundle': True,
+    'includesAppleReminders': True,
     'iconAppearances': ['light', 'dark', 'tinted'],
     'minimumIOS': '26.0', 'commit': commit,
     'expo': package['dependencies']['expo'], 'reactNative': package['dependencies']['react-native'],
@@ -158,6 +167,9 @@ It does not require Expo Go or a running Metro development server after installa
 6. Enter the URL of your running family server. Localhost on a phone refers to the phone.
 7. For browser capture, enable Pocket in Settings > Apps > Safari > Extensions.
    Sign in separately as the child in the extension and enable each store you want to watch.
+8. For subscription checklists, open Subscriptions > Apple Reminders and connect the list.
+   Allow Reminders access. Sync runs while Pocket is active and when you reopen it;
+   the family server records recurring deductions even while the app is closed.
 
 The extension reads supported order confirmations; it does not access Apple Pay events,
 collect card details, or capture every checkout. Family activity is visible in the app inbox.

@@ -73,6 +73,8 @@ export function parseHealth(value: unknown): ServerHealth {
   if (!record(value) || typeof value.setupRequired !== 'boolean' || typeof value.pushConfigured !== 'boolean') invalidResponse();
   if (value.capabilities !== undefined) {
     if (!record(value.capabilities)) invalidResponse();
+    if (value.capabilities.subscriptions !== undefined && typeof value.capabilities.subscriptions !== 'boolean') invalidResponse();
+    if (value.capabilities.subscriptionReminders !== undefined && typeof value.capabilities.subscriptionReminders !== 'boolean') invalidResponse();
     if (value.capabilities.fts !== undefined) {
       const fts = value.capabilities.fts;
       if (!record(fts) || !Number.isSafeInteger(fts.setupCodeDigits) || (fts.setupCodeDigits as number) < 1 ||

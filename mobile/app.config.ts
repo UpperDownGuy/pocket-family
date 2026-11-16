@@ -18,10 +18,11 @@ const config: ExpoConfig = {
       ITSAppUsesNonExemptEncryption: false,
     },
   },
-  android: { package: bundleIdentifier, predictiveBackGestureEnabled: true },
+  android: { package: bundleIdentifier, predictiveBackGestureEnabled: true, blockedPermissions: ['android.permission.READ_CALENDAR', 'android.permission.WRITE_CALENDAR'] },
   web: { output: 'static', favicon: './assets/images/pocket.png' },
   plugins: [
     'expo-router', 'expo-secure-store',
+    ['expo-calendar', { calendarPermission: false, remindersPermission: 'Pocket creates your subscription list and checks off reminders after charges are recorded in your Pocket balance.' }],
     ['expo-camera', { cameraPermission: 'Pocket uses your camera to scan File Tracker earnings codes.', microphonePermission: false, recordAudioAndroid: false, barcodeScannerEnabled: true }],
     ['expo-splash-screen', { image: './assets/images/pocket.png', imageWidth: 96, backgroundColor: '#F4F6F3', dark: { backgroundColor: '#101B18' } }],
     ['expo-build-properties', { ios: { deploymentTarget: '26.0' }, android: { usesCleartextTraffic: true } }],

@@ -10,7 +10,7 @@ import { type LedgerTransaction, money } from '@/data';
 const light = { background: '#F4F6F3', card: '#FFFFFF', text: '#172F29', secondary: '#64726C', accent: '#0C6D57', line: '#E2E8E2', soft: '#E5F2EA', danger: '#AD303B' };
 const dark = { background: '#101B18', card: '#1B2924', text: '#F1F6F2', secondary: '#ABBEB3', accent: '#7CD8AE', line: '#31423A', soft: '#263D31', danger: '#FF9DA5' };
 export function usePalette() { return useColorScheme() === 'dark' ? dark : light; }
-export type IconName = 'wallet' | 'activity' | 'inbox' | 'family' | 'plus' | 'bag' | 'chevron' | 'check' | 'server' | 'safari' | 'logout' | 'bellOff' | 'person' | 'close' | 'qr' | 'computer' | 'copy' | 'trash';
+export type IconName = 'wallet' | 'activity' | 'inbox' | 'family' | 'plus' | 'bag' | 'chevron' | 'check' | 'server' | 'safari' | 'logout' | 'bellOff' | 'person' | 'close' | 'qr' | 'computer' | 'copy' | 'trash' | 'repeat' | 'pause' | 'play' | 'reminders';
 const icons: Record<IconName, ComponentProps<typeof SymbolView>['name']> = {
   wallet: { ios: 'wallet.bifold.fill', android: 'account_balance_wallet', web: 'account_balance_wallet' },
   activity: { ios: 'arrow.up.arrow.down', android: 'swap_vert', web: 'swap_vert' },
@@ -30,6 +30,10 @@ const icons: Record<IconName, ComponentProps<typeof SymbolView>['name']> = {
   computer: { ios: 'desktopcomputer', android: 'computer', web: 'computer' },
   copy: { ios: 'doc.on.doc', android: 'content_copy', web: 'content_copy' },
   trash: { ios: 'trash', android: 'delete_outline', web: 'delete_outline' },
+  repeat: { ios: 'repeat', android: 'repeat', web: 'repeat' },
+  pause: { ios: 'pause', android: 'pause', web: 'pause' },
+  play: { ios: 'play', android: 'play_arrow', web: 'play_arrow' },
+  reminders: { ios: 'checklist', android: 'checklist', web: 'checklist' },
 };
 export function Icon({ name, size = 22, color }: { name: IconName; size?: number; color?: string }) {
   const colors = usePalette();

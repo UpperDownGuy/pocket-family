@@ -20,6 +20,10 @@ The instructions below describe the original SwiftUI build. For the Expo app, us
 
 For the existing Windows Docker deployment, see [automatic server updates](AUTO-UPDATE.md). Its scheduled task checks GitHub every minute, backs up before updating, and preserves the existing deployment configuration and volumes.
 
+For cellular or outside-home access, use the existing HTTPS server address and [Cloudflare Tunnel configuration](EXTERNAL-ACCESS.md).
+
+In Expo, **Subscriptions** lets parents choose a child and manage that child's recurring costs. Kids see their own list. Weekly, monthly, and yearly charges deduct from the Pocket balance automatically, including below zero, and appear in the parents' and affected child's Inbox. The server must be updated and running; pausing or deleting a Pocket schedule stops future ledger charges, without changing an outside store's billing.
+
 [File Tracker earnings](FTS-CREDITS.md) connects the Python FTS app to Pocket with single-use QR credits, automatic redemption status, and parent/child scanning flows.
 
 Parents can add money, record purchases, and manage family members. Children can record their own purchases and see their own balance. Every balance change creates an inbox entry for all parents and the affected child. Siblings cannot read one another's balances, purchases, or alerts through the API.

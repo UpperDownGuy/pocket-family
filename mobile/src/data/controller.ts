@@ -1,9 +1,10 @@
 import { APIError, PocketAPI } from './api';
 import type { FetchTransport } from './api';
-import type { AuthResponse, FamilyDeletionContext, FamilyRegistrationInput, MemberInput, PocketActions, PocketSnapshot, SetupInput, TransactionInput } from './models';
+import type { AuthResponse, FamilyDeletionContext, FamilyRegistrationInput, MemberInput, PendingSubscriptionUpdate, PocketActions, PocketSnapshot, SetupInput, Subscription, SubscriptionInput, SubscriptionPatch, TransactionInput } from './models';
 import { DEFAULT_SERVER_URL, FAMILY_DELETE_UPDATE_MESSAGE, FAMILY_UPDATE_MESSAGE, MAX_TRANSACTION_CENTS, parseFamilyCode, validateServerURL } from './validation';
 import { parseCreditCode } from './credits';
 import { transactionPayload } from './payments';
+import { REMINDERS_UPDATE_MESSAGE, subscriptionPatchPayload, subscriptionPayload, SUBSCRIPTIONS_UPDATE_MESSAGE, validateSubscriptionID, validateSubscriptionInput, validateSubscriptionPatch } from './subscriptions';
 
 export interface SessionStorage {
   getServerURL(): Promise<string | null>;
@@ -22,7 +23,7 @@ class SupersededError extends Error {
 export class PocketController implements PocketActions {
   private snapshot: PocketSnapshot = {
     state: null, serverURL: DEFAULT_SERVER_URL, ready: false, busy: false,
-    error: null, setupRequired: false, signedIn: false, pendingTransaction: null,
+    error: null, setupRequired: false, signedIn: false, pendingTransaction: null, pendingSubscription: null, pendingSubscriptionUpdate: null,
     familyRegistrationAvailable: false, multipleFamilies: false, familyCodeHint: '',
   };
   private readonly listeners = new Set<() => void>();
@@ -36,6 +37,8 @@ export class PocketController implements PocketActions {
   private initialization: Promise<void> | null = null;
   private storageQueue: Promise<unknown> = Promise.resolve();
   private pendingTransactions = new Map<string, TransactionInput>();
+  private pendingSubscriptions = new Map<string, SubscriptionInput>();
+  private pendingSubscriptionUpdates = new Map<string, PendingSubscriptionUpdate>();
   private familyCodes = new Map<string, string>();
 
   constructor(storage: SessionStorage, transport: FetchTransport) {
@@ -180,7 +183,12 @@ export class PocketController implements PocketActions {
 
       // Clear only this family's cached retry state, even if another account has
       // signed in while the server was deleting it. Never sign that account out.
-      for (const member of family.members) this.pendingTransactions.delete(`${session.api.serverURL}\n${member.id}`);
+      for (const member of family.members) {
+        const scope = `${session.api.serverURL}\n${member.id}`;
+        this.pendingTransactions.delete(scope);
+        this.pendingSubscriptions.delete(scope);
+        this.pendingSubscriptionUpdates.delete(scope);
+      }
       if (this.familyCodes.get(session.api.serverURL) === code) this.familyCodes.delete(session.api.serverURL);
       // A foreground refresh can discover the deleted session before DELETE's
       // reply arrives. Clear that signed-out hint without touching a new login.
@@ -268,6 +276,129 @@ export class PocketController implements PocketActions {
   };
 
   transactionItems = async (id: string) => this.sessionResult(session => session.api.transactionItems(session.token, id));
+
+  listSubscriptions = async () => this.sessionResult(async session => {
+    await this.requireSubscriptions(session);
+    const scope = this.subscriptionScope(session);
+    const pending = this.pendingSubscriptionUpdates.get(scope);
+    const subscriptions = await session.api.listSubscriptions(session.token);
+    this.assertSession(session);
+    subscriptions.forEach(subscription => this.assertSubscriptionChild(subscription.childId));
+    // The complete authorized list is authoritative for removed schedules. A
+    // deleted schedule has no detail form in which to retry an uncertain edit.
+    const current = this.pendingSubscriptionUpdates.get(scope);
+    if (pending && !subscriptions.some(subscription => subscription.id === pending.id) && current?.id === pending.id && current.patch.idempotencyKey === pending.patch.idempotencyKey) {
+      this.pendingSubscriptionUpdates.delete(scope);
+      this.update({ pendingSubscriptionUpdate: null });
+    }
+    return subscriptions;
+  });
+
+  subscriptionSync = async () => this.sessionResult(async session => {
+    const health = await session.api.health();
+    this.assertSession(session);
+    if (health.capabilities?.subscriptionReminders !== true) throw new Error(REMINDERS_UPDATE_MESSAGE);
+    const feed = await session.api.subscriptionSync(session.token);
+    this.assertSession(session);
+    feed.subscriptions.forEach(subscription => this.assertSubscriptionChild(subscription.childId));
+    feed.charges.forEach(charge => this.assertSubscriptionChild(charge.childId));
+    return feed;
+  });
+
+  createSubscription = async (input: SubscriptionInput) => this.sessionResult(async session => {
+    const validated = validateSubscriptionInput(input);
+    this.assertSubscriptionChild(validated.childId);
+    await this.requireSubscriptions(session);
+    const scope = this.subscriptionScope(session);
+    const pending = this.pendingSubscriptions.get(scope);
+    if (pending && subscriptionPayload(pending) !== subscriptionPayload(validated)) throw new Error('A subscription is still unconfirmed. Retry that same subscription before creating another.');
+    const request = { ...(pending ?? validated) };
+    this.pendingSubscriptions.set(scope, request);
+    this.update({ pendingSubscription: request });
+    let result: Subscription;
+    try { result = await session.api.createSubscription(session.token, request); }
+    catch (error) {
+      if ((!pending && this.definitiveRejection(error)) || (error instanceof APIError && (error.status === 410 || this.uncommittedPastDate(error)))) {
+        if (this.pendingSubscriptions.get(scope)?.idempotencyKey === request.idempotencyKey) this.pendingSubscriptions.delete(scope);
+        if (this.current(session.generation)) this.update({ pendingSubscription: this.pendingSubscriptions.get(scope) ?? null });
+      }
+      throw error;
+    }
+    if (this.pendingSubscriptions.get(scope)?.idempotencyKey === request.idempotencyKey) this.pendingSubscriptions.delete(scope);
+    this.assertSession(session);
+    this.assertSubscriptionChild(result.childId);
+    this.update({ pendingSubscription: this.pendingSubscriptions.get(scope) ?? null });
+    await this.refreshAfterSubscription(session);
+    return result;
+  });
+
+  updateSubscription = async (id: string, input: SubscriptionPatch) => this.sessionResult(async session => {
+    validateSubscriptionID(id);
+    const validated = validateSubscriptionPatch(input);
+    if (!validated.idempotencyKey) throw new Error('This subscription request is invalid. Reopen the form.');
+    await this.requireSubscriptions(session);
+    const scope = this.subscriptionScope(session);
+    const pending = this.pendingSubscriptionUpdates.get(scope);
+    if (pending && (pending.id !== id || subscriptionPatchPayload(pending.patch) !== subscriptionPatchPayload(validated))) throw new Error('A subscription update is still unconfirmed. Retry that same update before making another change.');
+    const request = pending ?? { id, patch: validated };
+    this.pendingSubscriptionUpdates.set(scope, request);
+    this.update({ pendingSubscriptionUpdate: request });
+    let result: Subscription;
+    try { result = await session.api.updateSubscription(session.token, id, request.patch); }
+    catch (error) {
+      if ((!pending && this.definitiveRejection(error)) || (error instanceof APIError && (error.status === 404 || this.uncommittedPastDate(error)))) {
+        const current = this.pendingSubscriptionUpdates.get(scope);
+        if (current?.id === id && current.patch.idempotencyKey === request.patch.idempotencyKey) this.pendingSubscriptionUpdates.delete(scope);
+        if (this.current(session.generation)) this.update({ pendingSubscriptionUpdate: this.pendingSubscriptionUpdates.get(scope) ?? null });
+      }
+      throw error;
+    }
+    const current = this.pendingSubscriptionUpdates.get(scope);
+    if (current?.id === id && current.patch.idempotencyKey === request.patch.idempotencyKey) this.pendingSubscriptionUpdates.delete(scope);
+    this.assertSession(session);
+    this.assertSubscriptionChild(result.childId);
+    this.update({ pendingSubscriptionUpdate: this.pendingSubscriptionUpdates.get(scope) ?? null });
+    await this.refreshAfterSubscription(session);
+    return result;
+  });
+
+  deleteSubscription = async (id: string) => this.sessionResult(async session => {
+    await this.requireSubscriptions(session);
+    const scope = this.subscriptionScope(session);
+    await session.api.deleteSubscription(session.token, id);
+    if (this.pendingSubscriptionUpdates.get(scope)?.id === id) this.pendingSubscriptionUpdates.delete(scope);
+    this.assertSession(session);
+    this.update({ pendingSubscriptionUpdate: this.pendingSubscriptionUpdates.get(scope) ?? null });
+    await this.refreshAfterSubscription(session);
+  });
+
+  private async requireSubscriptions(session: Session): Promise<void> {
+    const health = await session.api.health();
+    this.assertSession(session);
+    if (health.capabilities?.subscriptions !== true) throw new Error(SUBSCRIPTIONS_UPDATE_MESSAGE);
+  }
+  private subscriptionScope(session: Session): string {
+    const user = this.snapshot.state?.user;
+    if (!user) throw new Error('Sign in to continue.');
+    return `${session.api.serverURL}\n${user.id}`;
+  }
+  private assertSubscriptionChild(childId: string): void {
+    const family = this.snapshot.state;
+    if (!family || (family.user.role === 'child' && childId !== family.user.id) || !family.members.some(member => member.id === childId && member.role === 'child')) throw new Error('This account cannot access that subscription.');
+  }
+  private definitiveRejection(error: unknown): boolean {
+    return error instanceof APIError && error.status >= 400 && error.status < 500 && ![408, 429].includes(error.status);
+  }
+  private uncommittedPastDate(error: APIError): boolean {
+    // This precise response is returned only after the server checks the saved
+    // idempotency key. A committed request replays before any date-age check.
+    return error.status === 400 && error.message === 'Choose today or a future charge date.';
+  }
+  private async refreshAfterSubscription(session: Session): Promise<void> {
+    // The mutation is confirmed even when the follow-up balance refresh fails.
+    try { await this.loadState(session); }
+    catch (error) { this.assertSession(session); await this.handleError(error, session.generation); }
+  }
 
   markRead = async (ids: string[]): Promise<void> => {
     if (!ids.length) return;
@@ -366,7 +497,9 @@ export class PocketController implements PocketActions {
       this.assertSession(session);
       if (sequence !== this.stateSequence) return;
       if (state.familyCode) this.familyCodes.set(session.api.serverURL, state.familyCode);
-      this.update({ state, error: null, familyCodeHint: state.familyCode ?? '', pendingTransaction: this.pendingTransactions.get(`${session.api.serverURL}\n${state.user.id}`) ?? null });
+      const scope = `${session.api.serverURL}\n${state.user.id}`;
+      this.update({ state, error: null, familyCodeHint: state.familyCode ?? '', pendingTransaction: this.pendingTransactions.get(scope) ?? null,
+        pendingSubscription: this.pendingSubscriptions.get(scope) ?? null, pendingSubscriptionUpdate: this.pendingSubscriptionUpdates.get(scope) ?? null });
     } catch (error) {
       this.assertSession(session);
       if (sequence !== this.stateSequence) return;
@@ -405,7 +538,7 @@ export class PocketController implements PocketActions {
   private beginSessionChange(): number {
     this.generation++;
     this.token = null;
-    this.update({ state: null, signedIn: false, error: null, pendingTransaction: null });
+    this.update({ state: null, signedIn: false, error: null, pendingTransaction: null, pendingSubscription: null, pendingSubscriptionUpdate: null });
     return this.generation;
   }
   private current(expected: number): boolean { return expected === this.generation; }

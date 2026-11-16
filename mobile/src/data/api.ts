@@ -1,7 +1,8 @@
-import type { AuthResponse, FamilyRegistrationInput, FamilyState, MemberInput, ServerHealth, SetupInput, TransactionInput } from './models';
+import type { AuthResponse, FamilyRegistrationInput, FamilyState, MemberInput, ServerHealth, SetupInput, SubscriptionInput, SubscriptionPatch, TransactionInput } from './models';
 import { FAMILY_DELETE_UPDATE_MESSAGE, FAMILY_UPDATE_MESSAGE, parseAuth, parseFamilyCode, parseFamilyState, parseHealth, validateServerURL } from './validation';
 import { FTS_SERVER_UPDATE_MESSAGE, parseCreditCode, parseIssuedKey, parseIssuers, parseRedemption, parseRevokedIssuer, parseVoucher } from './credits';
 import { parseReceiptItems } from './payments';
+import { parseSubscriptionResponse, parseSubscriptions, parseSubscriptionSync, REMINDERS_UPDATE_MESSAGE, SUBSCRIPTIONS_UPDATE_MESSAGE, validateSubscriptionID, validateSubscriptionInput, validateSubscriptionPatch } from './subscriptions';
 
 export class APIError extends Error {
   readonly status: number;
@@ -67,6 +68,24 @@ export class PocketAPI {
   async logout(token: string): Promise<void> { await this.request('/logout', { token, body: {} }); }
   async addMember(token: string, input: MemberInput): Promise<void> { await this.request('/members', { token, body: input }); }
   async recordTransaction(token: string, input: TransactionInput): Promise<void> { await this.request('/transactions', { token, body: input }); }
+  async listSubscriptions(token: string) { return parseSubscriptions(await this.subscriptionsRequest('/subscriptions', { token })); }
+  async subscriptionSync(token: string) {
+    try { return parseSubscriptionSync(await this.request('/subscriptions/sync', { token })); }
+    catch (error) {
+      if (error instanceof APIError && [404, 405].includes(error.status)) throw new APIError(409, REMINDERS_UPDATE_MESSAGE);
+      throw error;
+    }
+  }
+  async createSubscription(token: string, input: SubscriptionInput) {
+    return parseSubscriptionResponse(await this.subscriptionsRequest('/subscriptions', { token, body: validateSubscriptionInput(input) }));
+  }
+  async updateSubscription(token: string, id: string, patch: SubscriptionPatch) {
+    return parseSubscriptionResponse(await this.subscriptionsRequest(this.subscriptionPath(id), { token, method: 'PATCH', body: validateSubscriptionPatch(patch) }));
+  }
+  async deleteSubscription(token: string, id: string): Promise<void> {
+    const response = await this.subscriptionsRequest(this.subscriptionPath(id), { token, method: 'DELETE' });
+    if (!response || typeof response !== 'object' || !('ok' in response) || response.ok !== true) throw new Error('The server did not confirm subscription deletion.');
+  }
   async transactionItems(token: string, id: string) {
     if (!/^[a-zA-Z0-9-]{1,100}$/.test(id)) throw new Error('Choose a valid receipt.');
     try { return parseReceiptItems(await this.request(`/transactions/${id}/items`, { token })); }
@@ -107,7 +126,18 @@ export class PocketAPI {
     }
   }
 
-  private async request(path: string, { token, body, method }: { token?: string; body?: unknown; method?: 'DELETE' } = {}): Promise<unknown> {
+  private subscriptionPath(id: string): string {
+    return `/subscriptions/${validateSubscriptionID(id)}`;
+  }
+  private async subscriptionsRequest(path: string, input: { token: string; body?: unknown; method?: 'PATCH' | 'DELETE' }): Promise<unknown> {
+    try { return await this.request(path, input); }
+    catch (error) {
+      if (error instanceof APIError && (error.status === 405 || (error.status === 404 && path === '/subscriptions'))) throw new APIError(409, SUBSCRIPTIONS_UPDATE_MESSAGE);
+      throw error;
+    }
+  }
+
+  private async request(path: string, { token, body, method }: { token?: string; body?: unknown; method?: 'DELETE' | 'PATCH' } = {}): Promise<unknown> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 20_000);
     const headers: Record<string, string> = { Accept: 'application/json' };

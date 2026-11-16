@@ -70,6 +70,8 @@ Invoke-RestMethod -Uri 'https://pocket.alexxweb.com/health' | ConvertTo-Json -De
 
 The updated API reports `capabilities.fts.setupCodeDigits: 8`, `childCanConnect: true`, and `parentComputerLog: true`. Once those appear, reload Pocket in Expo Go and refresh **Family → File Tracker**. Kids can create setup keys, and parents can manage every family computer and see computer activity in their Inbox.
 
+Recurring balance deductions require `capabilities.subscriptions: true`. Parent family deletion requires `capabilities.families.deletion: true`. A healthy connection without these flags means that the running image still predates those features. See [external access](EXTERNAL-ACCESS.md) if the public address fails while the LAN address works.
+
 ## Check or stop it
 
 ```powershell

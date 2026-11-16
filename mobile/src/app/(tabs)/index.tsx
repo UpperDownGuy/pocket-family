@@ -1,7 +1,7 @@
 import { router } from 'expo-router';
 import { Pressable, View } from 'react-native';
 import { usePocket, money } from '@/data';
-import { Avatar, Card, Empty, GlassButton, Icon, Notice, Screen, Section, TransactionRow, Txt, usePalette } from '@/components/pocket-ui';
+import { Avatar, Card, Empty, GlassButton, Icon, Notice, Row, Screen, Section, TransactionRow, Txt, usePalette } from '@/components/pocket-ui';
 export default function Balances() {
   const { state, refresh, busy, error } = usePocket();
   const colors = usePalette();
@@ -17,6 +17,7 @@ export default function Balances() {
       <GlassButton label="Scan earnings" icon="qr" onPress={() => router.push('/scan')} />
     </Card>
     {parent && <Section title="Kids">{children.length ? children.map(child => <Pressable accessibilityRole="button" key={child.id} onPress={() => router.push({ pathname: '/child/[id]', params: { id: child.id } })}><Card><View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}><Avatar name={child.name} id={child.id} /><View style={{ flex: 1 }}><Txt weight="600">{child.name}</Txt><Txt muted size={12}>Balance</Txt></View><Txt weight="600" size={19}>{money(child.balanceCents ?? 0)}</Txt><Icon name="chevron" size={13} /></View></Card></Pressable>) : <Card><Empty icon="family" title="Add your first child" detail="Each child gets their own balance and sign-in." /><GlassButton label="Add member" icon="plus" onPress={() => router.push('/member')} /></Card>}</Section>}
+    <Card><Row icon="repeat" title="Subscriptions" detail="Manage recurring balance deductions" onPress={() => router.push('/subscriptions')} /></Card>
     <Section title="Recent activity"><Card>{state.transactions.length ? state.transactions.slice(0, 5).map(item => <TransactionRow key={item.id} item={item} showChild={parent} />) : <Empty title="No activity" detail="Purchases and additions appear here." />}</Card></Section>
   </Screen>;
 }

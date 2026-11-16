@@ -2,7 +2,7 @@ import { DarkTheme, DefaultTheme, Stack, ThemeProvider } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { ActivityIndicator, useColorScheme, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { PocketProvider, usePocket } from '@/data';
+import { PocketProvider, RemindersProvider, usePocket } from '@/data';
 import { usePalette } from '@/components/pocket-ui';
 import { ReceivedPaymentsCard } from '@/components/received-payments';
 
@@ -21,6 +21,9 @@ function Navigation() {
       <Stack.Screen name="receipt/[id]" options={{ title: 'Details' }} />
       <Stack.Screen name="scan" options={{ title: 'Scan earnings' }} />
       <Stack.Screen name="file-tracker" options={{ title: 'File Tracker' }} />
+      <Stack.Screen name="subscriptions" options={{ title: 'Subscriptions' }} />
+      <Stack.Screen name="subscription" options={{ title: 'Subscription', presentation: 'modal' }} />
+      <Stack.Screen name="reminders" options={{ title: 'Apple Reminders' }} />
     </Stack.Protected>
     <Stack.Protected guard={!state} redirectTo="/(tabs)"><Stack.Screen name="sign-in" options={{ headerShown: false }} /></Stack.Protected>
     <Stack.Screen name="server" options={{ title: 'Server', presentation: 'modal' }} />
@@ -30,5 +33,5 @@ function Navigation() {
 }
 export default function RootLayout() {
   const dark = useColorScheme() === 'dark';
-  return <SafeAreaProvider><ThemeProvider value={dark ? DarkTheme : DefaultTheme}><PocketProvider><StatusBar style={dark ? 'light' : 'dark'} /><Navigation /><ReceivedPaymentsCard /></PocketProvider></ThemeProvider></SafeAreaProvider>;
+  return <SafeAreaProvider><ThemeProvider value={dark ? DarkTheme : DefaultTheme}><PocketProvider><RemindersProvider><StatusBar style={dark ? 'light' : 'dark'} /><Navigation /><ReceivedPaymentsCard /></RemindersProvider></PocketProvider></ThemeProvider></SafeAreaProvider>;
 }
