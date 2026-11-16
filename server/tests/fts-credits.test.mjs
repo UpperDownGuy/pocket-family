@@ -471,7 +471,7 @@ test('health reports supported computer setup and parent logging capabilities wi
   const health = await f.request('GET', '/health');
   assert.equal(health.httpStatus, 200);
   assert.deepEqual(health.capabilities, { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true },
-    families: { multiple: true, registration: true, deletion: true } });
+    families: { multiple: true, registration: true, deletion: true }, subscriptions: true, subscriptionReminders: true });
   assert.deepEqual(Object.keys(health).sort(), ['capabilities', 'httpStatus', 'pushConfigured', 'setupRequired']);
 });
 

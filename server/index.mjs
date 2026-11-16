@@ -20,8 +20,8 @@ export function createFTSPairingLimiter(clock = Date.now) {
   };
 }
 
-export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode, pushProvider = null } = {}) {
-  const registry = new FamilyRegistry(dbPath, { setupCode, pushProvider });
+export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode, pushProvider = null, clock } = {}) {
+  const registry = new FamilyRegistry(dbPath, { setupCode, pushProvider, clock });
   const store = registry.legacyStore;
   const attempts = new Map();
   const registrations = new Map();
@@ -76,7 +76,7 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       let output;
       if (route === 'GET /health') output = { setupRequired: registry.setupRequired, pushConfigured: registry.pushConfigured,
         capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true },
-          families: { multiple: true, registration: true, deletion: true } } };
+          families: { multiple: true, registration: true, deletion: true }, subscriptions: true, subscriptionReminders: true } };
       else if (route === 'POST /families') {
         limitRegistration(request);
         output = registry.create(await body(request));
@@ -114,6 +114,17 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
         if (route === 'GET /state') output = registry.withFamily(family, store.state(user));
         else if (route === 'DELETE /family') output = await registry.deleteFamily(family, store, user, await userBody());
         else if (route === 'POST /logout') { store.logout(user); output = { ok: true }; }
+        else if (route === 'GET /subscriptions/sync') output = store.subscriptionSync(user);
+        else if (route === 'GET /subscriptions') output = store.listSubscriptions(user);
+        else if (route === 'POST /subscriptions') {
+          output = store.createSubscription(user, await userBody());
+          void store.drainOutbox().catch(() => {});
+        } else if (request.method === 'PATCH' && /^\/subscriptions\/[a-f0-9-]{36}$/.test(path)) {
+          output = store.updateSubscription(user, path.split('/')[2], await userBody());
+          void store.drainOutbox().catch(() => {});
+        } else if (request.method === 'DELETE' && /^\/subscriptions\/[a-f0-9-]{36}$/.test(path)) {
+          output = store.deleteSubscription(user, path.split('/')[2]);
+        }
         else if (route === 'POST /members') {
           if (user.role !== 'parent') fail(403, 'Only a parent can add family members.');
           const member = store.addMember(await userBody());
@@ -146,7 +157,17 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
   });
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
-  const interval = setInterval(() => { if (!closing) void registry.drainOutbox().catch(() => {}); }, 5000);
+  const processSubscriptions = () => {
+    try { registry.processSubscriptions(); }
+    catch { console.error('Pocket could not process scheduled subscriptions. It will retry.'); }
+  };
+  processSubscriptions();
+  const interval = setInterval(() => {
+    if (!closing) {
+      processSubscriptions();
+      void registry.drainOutbox().catch(() => {});
+    }
+  }, 5000);
   interval.unref();
   return {
     server, store, registry,

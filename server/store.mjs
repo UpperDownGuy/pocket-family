@@ -33,6 +33,52 @@ function voucherCode(value) {
 const voucherJSON = row => ({ status: row.redeemed_at ? 'redeemed' : row.revoked_at ? 'revoked' : 'issued',
   amountCents: row.amount_cents, reportCount: row.report_count, editCount: row.edit_count,
   createdAt: row.created_at, redeemedAt: row.redeemed_at });
+const subscriptionJSON = row => ({ id: row.id, childId: row.child_id, name: row.name, amountCents: row.amount_cents,
+  interval: row.interval, nextChargeDate: row.next_charge_date, timeZone: row.time_zone, paused: !!row.paused,
+  createdAt: row.created_at, updatedAt: row.updated_at });
+function subscriptionDate(value) {
+  if (typeof value !== 'string' || !/^(?:20\d\d|21\d\d|2200)-\d{2}-\d{2}$/.test(value)) fail(400, 'Use a valid charge date from 2000 to 2200.');
+  const date = new Date(value + 'T00:00:00Z');
+  if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== value) fail(400, 'Use a valid charge date.');
+  return value;
+}
+function subscriptionZone(value) {
+  if (typeof value !== 'string' || value.length > 100 || !/^[A-Za-z][A-Za-z0-9_+./-]*$/.test(value)) fail(400, 'Choose a valid IANA time zone.');
+  try { return new Intl.DateTimeFormat('en-US', { timeZone: value }).resolvedOptions().timeZone; }
+  catch { fail(400, 'Choose a valid IANA time zone.'); }
+}
+const subscriptionCalendars = new Map();
+export function subscriptionToday(now, timeZone) {
+  let calendar = subscriptionCalendars.get(timeZone);
+  if (!calendar) {
+    calendar = new Intl.DateTimeFormat('en-US', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+    if (subscriptionCalendars.size < 600) subscriptionCalendars.set(timeZone, calendar);
+  }
+  const parts = calendar.formatToParts(now);
+  const values = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+export function nextSubscriptionDate(row) {
+  const [year, month, day] = row.next_charge_date.split('-').map(Number);
+  if (row.interval === 'weekly') return new Date(Date.UTC(year, month - 1, day + 7)).toISOString().slice(0, 10);
+  const nextMonth = row.interval === 'monthly' ? month : row.anchor_month - 1;
+  const nextYear = row.interval === 'yearly' ? year + 1 : year;
+  const lastDay = new Date(Date.UTC(nextYear, nextMonth + 1, 0)).getUTCDate();
+  return new Date(Date.UTC(nextYear, nextMonth, Math.min(row.anchor_day, lastDay))).toISOString().slice(0, 10);
+}
+function resumedSubscriptionDate(row, today) {
+  if (row.next_charge_date > today) return row.next_charge_date;
+  if (row.interval === 'weekly') {
+    const start = Date.parse(row.next_charge_date + 'T00:00:00Z');
+    const periods = Math.floor((Date.parse(today + 'T00:00:00Z') - start) / (7 * 86400000)) + 1;
+    return new Date(start + periods * 7 * 86400000).toISOString().slice(0, 10);
+  }
+  const [year, month] = today.split('-').map(Number);
+  const anchorMonth = row.interval === 'yearly' ? row.anchor_month : month;
+  const day = Math.min(row.anchor_day, new Date(Date.UTC(year, anchorMonth, 0)).getUTCDate());
+  const candidate = new Date(Date.UTC(year, anchorMonth - 1, day)).toISOString().slice(0, 10);
+  return candidate > today ? candidate : nextSubscriptionDate({ ...row, next_charge_date: candidate });
+}
 function reportItemPath(value) {
   if (typeof value !== 'string' || value.length < 1 || value.length > 500) fail(400, 'Report item paths must be 1–500 characters.');
   const path = value.replaceAll('\\', '/');
@@ -61,11 +107,12 @@ function reportItems(value, movieCount) {
 }
 
 export class FamilyStore {
-  constructor(path, { setupCode, pushProvider = null } = {}) {
+  constructor(path, { setupCode, pushProvider = null, clock = () => new Date() } = {}) {
     if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
     this.db = new DatabaseSync(path);
     this.setupCode = setupCode || randomBytes(12).toString('hex');
     this.pushProvider = pushProvider;
+    this.clock = clock;
     this.draining = false;
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
       CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -109,6 +156,17 @@ export class FamilyStore {
       CREATE TABLE IF NOT EXISTS fts_event_notifications (id TEXT PRIMARY KEY,recipient_id TEXT NOT NULL REFERENCES members(id),
         event_id TEXT NOT NULL REFERENCES fts_events(id),read_at TEXT,UNIQUE(recipient_id,event_id));
       CREATE INDEX IF NOT EXISTS fts_notification_recipient ON fts_event_notifications(recipient_id,event_id);
+      CREATE TABLE IF NOT EXISTS subscriptions (id TEXT PRIMARY KEY,child_id TEXT NOT NULL REFERENCES members(id),
+        name TEXT NOT NULL,amount_cents INTEGER NOT NULL CHECK(amount_cents>0),interval TEXT NOT NULL CHECK(interval IN ('weekly','monthly','yearly')),
+        next_charge_date TEXT NOT NULL,time_zone TEXT NOT NULL,anchor_day INTEGER NOT NULL,anchor_month INTEGER NOT NULL,
+        paused INTEGER NOT NULL DEFAULT 0,created_by TEXT NOT NULL REFERENCES members(id),created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+        deleted_at TEXT,idempotency_key TEXT NOT NULL,fingerprint TEXT NOT NULL,UNIQUE(created_by,idempotency_key));
+      CREATE TABLE IF NOT EXISTS subscription_charges (subscription_id TEXT NOT NULL REFERENCES subscriptions(id),
+        period_date TEXT NOT NULL,transaction_id TEXT NOT NULL UNIQUE REFERENCES transactions(id),PRIMARY KEY(subscription_id,period_date));
+      CREATE TABLE IF NOT EXISTS subscription_mutations (subscription_id TEXT NOT NULL REFERENCES subscriptions(id),
+        actor_id TEXT NOT NULL REFERENCES members(id),idempotency_key TEXT NOT NULL,fingerprint TEXT NOT NULL,
+        PRIMARY KEY(actor_id,idempotency_key));
+      CREATE INDEX IF NOT EXISTS subscription_child ON subscriptions(child_id,deleted_at);
     `);
   }
   atomic(action) {
@@ -121,7 +179,7 @@ export class FamilyStore {
   clearFamily(deletedAt) {
     this.atomic(() => {
       // Foreign-key order preserves atomic removal of all active family data.
-      for (const table of ['outbox', 'notifications', 'fts_event_notifications', 'fts_events', 'fts_report_items',
+      for (const table of ['outbox', 'notifications', 'subscription_charges', 'subscription_mutations', 'subscriptions', 'fts_event_notifications', 'fts_events', 'fts_report_items',
         'fts_reports', 'fts_vouchers', 'fts_pairings', 'fts_issuers', 'devices', 'transactions', 'sessions', 'members', 'settings']) {
         this.db.exec(`DELETE FROM ${table}`);
       }
@@ -387,6 +445,135 @@ export class FamilyStore {
         title: note.title, body: note.body, createdAt: note.created_at, readAt: note.read_at })),
       computerNotifications: computerNotes.map(note => ({ id: note.id, issuerId: note.issuer_id, eventType: note.event_type,
         title: note.title, body: note.body, createdAt: note.created_at, readAt: note.read_at })), pushConfigured: this.pushConfigured };
+  }
+  subscription(user, id, includeDeleted = false) {
+    const row = this.db.prepare('SELECT * FROM subscriptions WHERE id=?').get(id);
+    if (!row || (user.role !== 'parent' && row.child_id !== user.id) || (!includeDeleted && row.deleted_at)) fail(404, 'Subscription not found.');
+    return row;
+  }
+  listSubscriptions(user) {
+    const rows = user.role === 'parent'
+      ? this.db.prepare('SELECT * FROM subscriptions WHERE deleted_at IS NULL ORDER BY paused,next_charge_date,id').all()
+      : this.db.prepare('SELECT * FROM subscriptions WHERE deleted_at IS NULL AND child_id=? ORDER BY paused,next_charge_date,id').all(user.id);
+    return { subscriptions: rows.map(subscriptionJSON) };
+  }
+  subscriptionSync(user) {
+    const sql = `SELECT c.subscription_id,c.period_date,c.transaction_id,t.child_id,t.created_at
+      FROM subscription_charges c JOIN transactions t ON t.id=c.transaction_id`;
+    const rows = user.role === 'parent'
+      ? this.db.prepare(`${sql} ORDER BY t.created_at,t.rowid`).all()
+      : this.db.prepare(`${sql} WHERE t.child_id=? ORDER BY t.created_at,t.rowid`).all(user.id);
+    return { ...this.listSubscriptions(user), charges: rows.map(row => ({ subscriptionId: row.subscription_id,
+      periodDate: row.period_date, transactionId: row.transaction_id, childId: row.child_id, createdAt: row.created_at })) };
+  }
+  subscriptionFields(input) {
+    const name = text(input.name, 'Subscription name', 1, 100);
+    if (!Number.isSafeInteger(input.amountCents) || input.amountCents < 1 || input.amountCents > 1_000_000) fail(400, 'Amount must be between $0.01 and $10,000.00 in whole cents.');
+    if (!['weekly', 'monthly', 'yearly'].includes(input.interval)) fail(400, 'Choose weekly, monthly, or yearly.');
+    return { name, amountCents: input.amountCents, interval: input.interval,
+      nextChargeDate: subscriptionDate(input.nextChargeDate), timeZone: subscriptionZone(input.timeZone) };
+  }
+  createSubscription(user, input) {
+    const childId = text(input.childId, 'Child', 1, 80);
+    if (user.role !== 'parent' && childId !== user.id) fail(403, 'You can only manage your own subscriptions.');
+    const values = { childId, ...this.subscriptionFields(input) };
+    const key = text(input.idempotencyKey, 'Request ID', 8, 100);
+    const fingerprint = hash(JSON.stringify(values));
+    const now = this.clock();
+    return this.atomic(() => {
+      const previous = this.db.prepare('SELECT * FROM subscriptions WHERE created_by=? AND idempotency_key=?').get(user.id, key);
+      if (previous) {
+        if (previous.fingerprint !== fingerprint) fail(409, 'This request ID was already used for a different subscription.');
+        if (previous.deleted_at) fail(410, 'This subscription has been removed.');
+        return { subscription: subscriptionJSON(previous), replayed: true };
+      }
+      if (!this.db.prepare("SELECT id FROM members WHERE id=? AND role='child'").get(childId)) fail(404, 'Child not found.');
+      if (values.nextChargeDate < subscriptionToday(now, values.timeZone)) fail(400, 'Choose today or a future charge date.');
+      if (this.db.prepare('SELECT COUNT(*) AS count FROM subscriptions WHERE deleted_at IS NULL').get().count >= 100
+        || this.db.prepare('SELECT COUNT(*) AS count FROM subscriptions WHERE child_id=? AND deleted_at IS NULL').get(childId).count >= 20) {
+        fail(409, 'A child can have up to 20 subscriptions and a family up to 100.');
+      }
+      const row = { id: randomUUID(), child_id: childId, name: values.name, amount_cents: values.amountCents,
+        interval: values.interval, next_charge_date: values.nextChargeDate, time_zone: values.timeZone,
+        anchor_day: Number(values.nextChargeDate.slice(8)), anchor_month: Number(values.nextChargeDate.slice(5, 7)),
+        paused: 0, created_by: user.id, created_at: now.toISOString(), updated_at: now.toISOString(), deleted_at: null };
+      this.db.prepare('INSERT INTO subscriptions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)').run(row.id, childId, row.name, row.amount_cents,
+        row.interval, row.next_charge_date, row.time_zone, row.anchor_day, row.anchor_month, 0, user.id, row.created_at, row.updated_at, key, fingerprint);
+      if (row.next_charge_date <= subscriptionToday(now, row.time_zone)) this.appendSubscriptionCharge(row, now);
+      return { subscription: subscriptionJSON(this.subscription(user, row.id)), replayed: false };
+    });
+  }
+  updateSubscription(user, id, input) {
+    const allowed = ['name', 'amountCents', 'interval', 'nextChargeDate', 'timeZone', 'paused'];
+    if (Object.keys(input).some(key => ![...allowed, 'idempotencyKey'].includes(key)) || !allowed.some(key => Object.hasOwn(input, key))) fail(400, 'Choose subscription details to update.');
+    if (input.paused !== undefined && typeof input.paused !== 'boolean') fail(400, 'Paused must be true or false.');
+    const key = input.idempotencyKey === undefined ? null : text(input.idempotencyKey, 'Request ID', 8, 100);
+    const normalized = {};
+    for (const field of allowed) if (Object.hasOwn(input, field)) normalized[field] = input[field];
+    const fingerprint = hash(JSON.stringify({ id, ...normalized }));
+    const now = this.clock();
+    return this.atomic(() => {
+      const row = this.subscription(user, id);
+      if (key) {
+        const previous = this.db.prepare('SELECT * FROM subscription_mutations WHERE actor_id=? AND idempotency_key=?').get(user.id, key);
+        if (previous) {
+          if (previous.fingerprint !== fingerprint || previous.subscription_id !== id) fail(409, 'This request ID was already used for another subscription change.');
+          return { subscription: subscriptionJSON(row), replayed: true };
+        }
+      }
+      const values = this.subscriptionFields({ ...subscriptionJSON(row), ...input });
+      const today = subscriptionToday(now, values.timeZone);
+      const scheduleChanged = Object.hasOwn(input, 'nextChargeDate') || values.interval !== row.interval || values.timeZone !== row.time_zone;
+      if (scheduleChanged && values.nextChargeDate < today) fail(400, 'Choose today or a future charge date.');
+      if (!row.paused && !scheduleChanged && input.paused !== true && row.next_charge_date < today) fail(409, 'This subscription is catching up. Try again shortly.');
+      if (values.nextChargeDate !== row.next_charge_date || values.interval !== row.interval) {
+        row.anchor_day = Number(values.nextChargeDate.slice(8));
+        row.anchor_month = Number(values.nextChargeDate.slice(5, 7));
+      }
+      Object.assign(row, { name: values.name, amount_cents: values.amountCents, interval: values.interval,
+        next_charge_date: values.nextChargeDate, time_zone: values.timeZone });
+      if (row.paused && input.paused === false && !Object.hasOwn(input, 'nextChargeDate')) row.next_charge_date = resumedSubscriptionDate(row, today);
+      if (input.paused !== undefined) row.paused = input.paused ? 1 : 0;
+      row.updated_at = now.toISOString();
+      this.db.prepare('UPDATE subscriptions SET name=?,amount_cents=?,interval=?,next_charge_date=?,time_zone=?,anchor_day=?,anchor_month=?,paused=?,updated_at=? WHERE id=?')
+        .run(row.name, row.amount_cents, row.interval, row.next_charge_date, row.time_zone, row.anchor_day, row.anchor_month, row.paused, row.updated_at, id);
+      if (!row.paused && row.next_charge_date <= today) this.appendSubscriptionCharge(row, now);
+      if (key) this.db.prepare('INSERT INTO subscription_mutations VALUES (?,?,?,?)').run(id, user.id, key, fingerprint);
+      return { subscription: subscriptionJSON(this.subscription(user, id)), replayed: false };
+    });
+  }
+  deleteSubscription(user, id) {
+    return this.atomic(() => {
+      const row = this.subscription(user, id, true);
+      if (!row.deleted_at) this.db.prepare('UPDATE subscriptions SET deleted_at=?,updated_at=? WHERE id=?').run(this.clock().toISOString(), this.clock().toISOString(), id);
+      return { ok: true };
+    });
+  }
+  dueSubscriptions(now) {
+    if (this.deleting || this.deletedAt) return [];
+    return this.db.prepare('SELECT * FROM subscriptions WHERE paused=0 AND deleted_at IS NULL ORDER BY next_charge_date,id').all()
+      .filter(row => row.next_charge_date <= subscriptionToday(now, row.time_zone));
+  }
+  chargeSubscription(id, now = this.clock()) {
+    if (this.deleting || this.deletedAt) return false;
+    return this.atomic(() => {
+      const row = this.db.prepare('SELECT * FROM subscriptions WHERE id=? AND paused=0 AND deleted_at IS NULL').get(id);
+      if (!row || row.next_charge_date > subscriptionToday(now, row.time_zone)) return false;
+      this.appendSubscriptionCharge(row, now);
+      return true;
+    });
+  }
+  // Must run inside the schedule's transaction: ledger, recipients, unique
+  // period marker and advancing the next date either all commit or all retry.
+  appendSubscriptionCharge(row, now) {
+    const period = row.next_charge_date;
+    if (!this.db.prepare('SELECT 1 FROM subscription_charges WHERE subscription_id=? AND period_date=?').get(row.id, period)) {
+      const result = this.appendTransaction({ id: row.created_by }, { childId: row.child_id, kind: 'purchase', amountCents: row.amount_cents,
+        merchant: row.name, note: `Subscription · ${period}`, idempotencyKey: `subscription:${row.id}:${period}`,
+        fingerprint: hash(JSON.stringify({ subscriptionId: row.id, period, amountCents: row.amount_cents })) });
+      this.db.prepare('INSERT INTO subscription_charges VALUES (?,?,?)').run(row.id, period, result.transaction.id);
+    }
+    this.db.prepare('UPDATE subscriptions SET next_charge_date=?,updated_at=? WHERE id=?').run(nextSubscriptionDate(row), now.toISOString(), row.id);
   }
   createTransaction(user, input) {
     const childId = text(input.childId, 'Child', 1, 80);
@@ -694,6 +881,33 @@ export class FamilyRegistry {
       if (!this.db.prepare('SELECT 1 FROM deleted_families WHERE family_id=?').get(family.id)) store.deleting = false;
       throw error;
     }
+  }
+  processSubscriptions({ now = this.options.clock?.() ?? new Date(), limit = 25 } = {}) {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('Choose a subscription batch size from 1 to 100.');
+    const candidates = this.list().flatMap(family => {
+      const store = this.stores.get(family.id);
+      return store.dueSubscriptions(now).map(row => ({ store, familyId: family.id, row }));
+    });
+    const order = (a, b) => a.row.next_charge_date.localeCompare(b.row.next_charge_date)
+      || a.row.id.localeCompare(b.row.id) || a.familyId.localeCompare(b.familyId);
+    let processed = 0;
+    let failed = 0;
+    let attempted = 0;
+    while (candidates.length && attempted < limit) {
+      candidates.sort(order);
+      const { store, familyId, row } = candidates.shift();
+      attempted++;
+      try {
+        if (store.chargeSubscription(row.id, now)) processed++;
+        const next = store.db.prepare('SELECT * FROM subscriptions WHERE id=? AND paused=0 AND deleted_at IS NULL').get(row.id);
+        if (next && !store.deleting && !store.deletedAt && next.next_charge_date <= subscriptionToday(now, next.time_zone)) candidates.push({ store, familyId, row: next });
+      } catch {
+        // A failed charge remains due for the next pass. Do not starve other
+        // families or advance a schedule whose ledger transaction rolled back.
+        failed++;
+      }
+    }
+    return { processed, failed, dueRemaining: candidates.length > 0 || failed > 0 };
   }
   async drainOutbox() { await Promise.all(this.allStores().map(store => store.drainOutbox())); }
   close() { for (const store of this.allStores()) store.close(); this.db.close(); }
