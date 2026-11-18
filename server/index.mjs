@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { APIError, FamilyRegistry, fail } from './store.mjs';
 import { createAPNsProvider } from './apns.mjs';
 
@@ -49,8 +50,10 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       if (attempt.count > maximum) fail(429, 'Too many family setup attempts. Try again in ten minutes.');
     }
   }
-  async function body(request, maximumBytes = 16384) {
+  async function body(request, maximumBytes = 16384, allowGzip = false) {
     if (!String(request.headers['content-type'] ?? '').startsWith('application/json')) fail(415, 'Send JSON.');
+    const encoding = String(request.headers['content-encoding'] ?? 'identity').trim().toLowerCase();
+    if (encoding !== 'identity' && !(allowGzip && encoding === 'gzip')) fail(415, 'Unsupported request encoding.');
     let size = 0;
     const chunks = [];
     for await (const chunk of request) {
@@ -58,8 +61,16 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       if (size > maximumBytes) fail(413, 'Request is too large.');
       chunks.push(chunk);
     }
+    let bytes = Buffer.concat(chunks);
+    if (encoding === 'gzip') {
+      try { bytes = gunzipSync(bytes, { maxOutputLength: maximumBytes }); }
+      catch (error) {
+        if (error.code === 'ERR_BUFFER_TOO_LARGE') fail(413, 'Decompressed request is too large.');
+        fail(400, 'Invalid gzip request.');
+      }
+    }
     try {
-      const value = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      const value = JSON.parse(bytes.toString('utf8'));
       if (!value || typeof value !== 'object' || Array.isArray(value)) fail(400, 'Send a JSON object.');
       return value;
     } catch (error) { if (error instanceof APIError) throw error; fail(400, 'Invalid JSON.'); }
@@ -75,7 +86,7 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       const route = `${request.method} ${path}`;
       let output;
       if (route === 'GET /health') output = { setupRequired: registry.setupRequired, pushConfigured: registry.pushConfigured,
-        capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true },
+        capabilities: { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true, manualReplacementCredits: true },
           families: { multiple: true, registration: true, deletion: true }, subscriptions: true, subscriptionReminders: true } };
       else if (route === 'POST /families') {
         limitRegistration(request);
@@ -88,18 +99,19 @@ export function createFamilyServer({ dbPath = './data/pocket.sqlite', setupCode,
       } else if (route === 'POST /fts/pair') {
         limitPairing(request.socket.remoteAddress);
         output = registry.pair(await body(request));
-      } else if (route === 'GET /fts/connection' || route === 'POST /fts/vouchers' || route === 'POST /fts/vouchers/status') {
+      } else if (route === 'GET /fts/connection' || route === 'POST /fts/vouchers' || route === 'POST /fts/vouchers/status' || route === 'POST /fts/vouchers/replacement') {
         // Tracker keys can issue and poll credits only. They are deliberately
         // not family sessions and cannot inspect accounts or spend money.
         const { store, actor: issuer } = registry.authenticated(request.headers.authorization, true, { allowRevoked: route === 'POST /fts/vouchers/status' });
-        const issuerBody = async (maximumBytes = 16384) => {
-          const input = await body(request, maximumBytes);
+        const issuerBody = async (maximumBytes = 16384, allowGzip = false) => {
+          const input = await body(request, maximumBytes, allowGzip);
           const current = registry.authenticated(request.headers.authorization, true, { allowRevoked: route === 'POST /fts/vouchers/status' });
           if (current.store !== store || current.actor.id !== issuer.id) fail(401, 'Reconnect this file tracker before continuing.');
           return input;
         };
         if (route === 'GET /fts/connection') output = store.ftsConnection(issuer);
         else if (route === 'POST /fts/vouchers') output = store.issueFTSVoucher(issuer, await issuerBody(512 * 1024));
+        else if (route === 'POST /fts/vouchers/replacement') output = store.issueFTSReplacement(issuer, await issuerBody(512 * 1024, true));
         else output = store.ftsVoucherStatus(issuer, await issuerBody());
       } else {
         const { store, family, actor: user } = registry.authenticated(request.headers.authorization);

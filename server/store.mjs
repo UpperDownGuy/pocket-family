@@ -32,7 +32,9 @@ function voucherCode(value) {
 }
 const voucherJSON = row => ({ status: row.redeemed_at ? 'redeemed' : row.revoked_at ? 'revoked' : 'issued',
   amountCents: row.amount_cents, reportCount: row.report_count, editCount: row.edit_count,
-  createdAt: row.created_at, redeemedAt: row.redeemed_at });
+  createdAt: row.created_at, redeemedAt: row.redeemed_at,
+  ...(row.base_amount_cents != null ? { kind: 'manualReplacement', baseAmountCents: row.base_amount_cents,
+    adjustmentCents: row.adjustment_cents, reason: row.reason } : {}) });
 const subscriptionJSON = row => ({ id: row.id, childId: row.child_id, name: row.name, amountCents: row.amount_cents,
   interval: row.interval, nextChargeDate: row.next_charge_date, timeZone: row.time_zone, paused: !!row.paused,
   createdAt: row.created_at, updatedAt: row.updated_at });
@@ -144,6 +146,9 @@ export class FamilyStore {
         transaction_id TEXT UNIQUE REFERENCES transactions(id));
       CREATE TABLE IF NOT EXISTS fts_reports (report_id TEXT PRIMARY KEY,voucher_hash TEXT NOT NULL REFERENCES fts_vouchers(code_hash),
         movie_count INTEGER NOT NULL CHECK(movie_count>0),price_cents INTEGER NOT NULL CHECK(price_cents>0));
+      CREATE TABLE IF NOT EXISTS fts_voucher_adjustments (voucher_hash TEXT PRIMARY KEY REFERENCES fts_vouchers(code_hash),
+        base_amount_cents INTEGER NOT NULL CHECK(base_amount_cents>0),adjustment_cents INTEGER NOT NULL CHECK(adjustment_cents<>0),
+        reason TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS fts_report_items (report_id TEXT NOT NULL REFERENCES fts_reports(report_id),
         position INTEGER NOT NULL,path TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('added','removed','modified','renamed')),
         old_path TEXT,PRIMARY KEY(report_id,position));
@@ -180,7 +185,7 @@ export class FamilyStore {
     this.atomic(() => {
       // Foreign-key order preserves atomic removal of all active family data.
       for (const table of ['outbox', 'notifications', 'subscription_charges', 'subscription_mutations', 'subscriptions', 'fts_event_notifications', 'fts_events', 'fts_report_items',
-        'fts_reports', 'fts_vouchers', 'fts_pairings', 'fts_issuers', 'devices', 'transactions', 'sessions', 'members', 'settings']) {
+        'fts_voucher_adjustments', 'fts_reports', 'fts_vouchers', 'fts_pairings', 'fts_issuers', 'devices', 'transactions', 'sessions', 'members', 'settings']) {
         this.db.exec(`DELETE FROM ${table}`);
       }
       this.db.prepare("INSERT INTO family_lifecycle VALUES ('deleted_at',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(deletedAt);
@@ -323,9 +328,17 @@ export class FamilyStore {
     for (const parent of parents) this.db.prepare('INSERT INTO fts_event_notifications VALUES (?,?,?,NULL)').run(randomUUID(), parent.id, eventId);
   }
   getFTSVoucher(code) {
-    return this.db.prepare(`SELECT v.*,i.revoked_at FROM fts_vouchers v JOIN fts_issuers i ON i.id=v.issuer_id WHERE v.code_hash=?`).get(hash(voucherCode(code)));
+    return this.db.prepare(`SELECT v.*,i.revoked_at,a.base_amount_cents,a.adjustment_cents,a.reason FROM fts_vouchers v
+      JOIN fts_issuers i ON i.id=v.issuer_id LEFT JOIN fts_voucher_adjustments a ON a.voucher_hash=v.code_hash
+      WHERE v.code_hash=?`).get(hash(voucherCode(code)));
   }
-  issueFTSVoucher(issuer, input) {
+  issueFTSReplacement(issuer, input) {
+    if (!Number.isSafeInteger(input.amountCents) || input.amountCents < 1 || input.amountCents > 1_000_000) fail(400, 'Replacement amount must be $0.01–$10,000.00 in whole cents.');
+    const reason = text(input.reason, 'Replacement reason', 1, 160);
+    if (/[\u0000-\u001f\u007f-\u009f]/u.test(input.reason) || /[\uD800-\uDFFF]/u.test(reason)) fail(400, 'Use a replacement reason without control characters.');
+    return this.issueFTSVoucher(issuer, { code: input.code, reports: [input.replacementReport] }, { amountCents: input.amountCents, reason });
+  }
+  issueFTSVoucher(issuer, input, replacement = null) {
     const code = voucherCode(input.code);
     if (!Array.isArray(input.reports) || input.reports.length < 1 || input.reports.length > 100) fail(400, 'Include 1–100 earned reports per credit code.');
     const seen = new Set();
@@ -351,7 +364,13 @@ export class FamilyStore {
       }
       return normalized;
     }).sort((a, b) => a.reportId < b.reportId ? -1 : a.reportId > b.reportId ? 1 : 0);
-    const fingerprint = hash(JSON.stringify(reports));
+    const baseAmountCents = amountCents;
+    if (replacement) {
+      if (replacement.amountCents === baseAmountCents) fail(400, 'A manual replacement must include a nonzero adjustment.');
+      amountCents = replacement.amountCents;
+    }
+    const fingerprint = hash(JSON.stringify(replacement
+      ? { kind: 'manualReplacement', reports, amountCents, reason: replacement.reason } : reports));
     const legacyFingerprint = hash(JSON.stringify(reports.map(({ reportId, movieCount, priceCents }) => ({ reportId, movieCount, priceCents }))));
     return this.atomic(() => {
       // Re-read inside the transaction so revocation cannot race issuance.
@@ -361,7 +380,7 @@ export class FamilyStore {
       if (previous) {
         // An older server ignored optional item fields. Honor a pending retry
         // after upgrade without retroactively changing its count-only receipt.
-        const legacyReplay = previous.fingerprint === legacyFingerprint && !this.db.prepare(`SELECT 1 FROM fts_report_items i
+        const legacyReplay = !replacement && previous.base_amount_cents == null && previous.fingerprint === legacyFingerprint && !this.db.prepare(`SELECT 1 FROM fts_report_items i
           JOIN fts_reports r ON r.report_id=i.report_id WHERE r.voucher_hash=? LIMIT 1`).get(previous.code_hash);
         if (previous.issuer_id !== issuer.id || (previous.fingerprint !== fingerprint && !legacyReplay)) fail(409, 'This code was already used for different earnings.');
         return voucherJSON(previous);
@@ -377,6 +396,10 @@ export class FamilyStore {
         for (const [position, item] of (report.items ?? []).entries()) {
           this.db.prepare('INSERT INTO fts_report_items VALUES (?,?,?,?,?)').run(report.reportId, position, item.path, item.status, item.oldPath ?? null);
         }
+      }
+      if (replacement) {
+        Object.assign(row, { base_amount_cents: baseAmountCents, adjustment_cents: amountCents - baseAmountCents, reason: replacement.reason });
+        this.db.prepare('INSERT INTO fts_voucher_adjustments VALUES (?,?,?,?)').run(row.code_hash, baseAmountCents, row.adjustment_cents, replacement.reason);
       }
       return voucherJSON(row);
     });
@@ -403,8 +426,11 @@ export class FamilyStore {
         return { ...voucherJSON(row), replayed: true };
       }
       if (row.revoked_at) fail(403, 'This file tracker has been disconnected. This code cannot be redeemed.');
-      const entry = { childId, kind: 'addition', amountCents: row.amount_cents, merchant: 'File edits',
-        note: `${row.edit_count} edits · ${row.report_count} ${row.report_count === 1 ? 'report' : 'reports'}`,
+      const adjusted = row.base_amount_cents != null;
+      const money = value => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(value / 100);
+      const entry = { childId, kind: 'addition', amountCents: row.amount_cents, merchant: adjusted ? 'File edits · manual replacement' : 'File edits',
+        note: `${row.edit_count} edits · ${row.report_count} ${row.report_count === 1 ? 'report' : 'reports'}` + (adjusted
+          ? ` · ${money(row.base_amount_cents)} earned · ${row.adjustment_cents > 0 ? '+' : '−'}${money(Math.abs(row.adjustment_cents))} adjustment: ${row.reason}` : ''),
         idempotencyKey: 'fts:' + randomUUID(), fingerprint: hash('fts:' + row.code_hash) };
       // The issuer authorized the immutable amount. This internal insert stays
       // in the same transaction as consuming the code and creating all alerts.

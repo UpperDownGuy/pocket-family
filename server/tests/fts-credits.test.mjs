@@ -4,6 +4,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { createFamilyServer, createFTSPairingLimiter } from '../index.mjs';
 import { APIError } from '../store.mjs';
 
@@ -49,7 +50,14 @@ async function fixture(t) {
   const preview = (creditCode, who = child) => request('POST', '/credits/preview', { code: creditCode }, who.token);
   const redeem = (creditCode, who = child, childId) => request('POST', '/credits/redeem', { code: creditCode, ...(childId === undefined ? {} : { childId }) }, who.token);
   const status = (creditCode, token = issuer.token) => request('POST', '/fts/vouchers/status', { code: creditCode }, token);
-  return { request, parent, parent2, child, sibling, issuer, mint, state, preview, redeem, status, pairIssuer,
+  const replacement = (input, token = issuer.token) => request('POST', '/fts/vouchers/replacement', input, token);
+  async function encoded(path, bytes, encoding = 'gzip', token = issuer.token) {
+    const response = await fetch(`http://127.0.0.1:${app.server.address().port}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'content-encoding': encoding, authorization: `Bearer ${token}` }, body: bytes,
+    });
+    return { httpStatus: response.status, ...(await response.json()) };
+  }
+  return { request, parent, parent2, child, sibling, issuer, mint, state, preview, redeem, status, pairIssuer, replacement, encoded,
     get app() { return app; },
     async reopen() { await app.close(); app = createFamilyServer({ dbPath, setupCode: 'different-code' }); await listen(); } };
 }
@@ -470,7 +478,7 @@ test('health reports supported computer setup and parent logging capabilities wi
   const f = await fixture(t);
   const health = await f.request('GET', '/health');
   assert.equal(health.httpStatus, 200);
-  assert.deepEqual(health.capabilities, { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true },
+  assert.deepEqual(health.capabilities, { fts: { setupCodeDigits: 8, childCanConnect: true, parentComputerLog: true, itemLists: true, manualReplacementCredits: true },
     families: { multiple: true, registration: true, deletion: true }, subscriptions: true, subscriptionReminders: true });
   assert.deepEqual(Object.keys(health).sort(), ['capabilities', 'httpStatus', 'pushConfigured', 'setupRequired']);
 });
@@ -612,4 +620,153 @@ test('item persistence failure rolls back the entire voucher and report reservat
   f.app.store.db.exec('DROP TRIGGER reject_receipt_item');
   assert.equal((await f.mint(creditCode, reportList)).httpStatus, 200);
   assert.equal((await f.redeem(creditCode)).status, 'redeemed');
+});
+
+const replacementInput = (id = 'actual-report', count = 344, amountCents = 5175) => ({
+  code: code(), replacementReport: reports(id, count)[0], amountCents, reason: 'Manual replacement credit',
+});
+
+test('compressed manual replacement preserves 344 actual edits, all items and a transparent 15-cent adjustment through restart and redemption', async t => {
+  const f = await fixture(t);
+  const separate = code();
+  await f.mint(separate, reports('separate-one-edit', 1));
+  const input = replacementInput();
+  input.replacementReport.items = Array.from({ length: 344 }, (_, index) => ({
+    path: `after/${String(index).padStart(3, '0')}-` + 'x'.repeat(180), status: 'renamed',
+    oldPath: `before/${String(index).padStart(3, '0')}-` + 'x'.repeat(180),
+  }));
+  const bytes = Buffer.from(JSON.stringify(input));
+  const compressed = gzipSync(bytes);
+  assert.ok(bytes.length > 32768);
+  assert.ok(compressed.length < 16384);
+  const issued = await f.encoded('/fts/vouchers/replacement', compressed);
+  assert.equal(issued.httpStatus, 200);
+  assert.equal(issued.kind, 'manualReplacement');
+  assert.equal(issued.amountCents, 5175);
+  assert.equal(issued.baseAmountCents, 5160);
+  assert.equal(issued.adjustmentCents, 15);
+  assert.equal(issued.reason, input.reason);
+  assert.equal(issued.editCount, 344);
+  assert.equal(issued.reportCount, 1);
+  assert.deepEqual(await f.replacement(input), issued);
+  assert.deepEqual(await f.preview(input.code), issued);
+  assert.equal((await f.mint(input.code, [input.replacementReport])).httpStatus, 409);
+  assert.equal((await f.mint(code(), [input.replacementReport])).httpStatus, 409);
+  for (const change of [{ amountCents: 5176 }, { reason: 'Different reason' },
+    { replacementReport: { ...input.replacementReport, items: [] } },
+    { replacementReport: { ...input.replacementReport, movieCount: 346 } }]) {
+    assert.equal((await f.replacement({ ...input, ...change })).httpStatus, 409);
+  }
+  const another = await f.pairIssuer(await f.request('POST', '/fts/issuers', { name: 'Another tracker', priceCents: 15 }, f.parent2.token));
+  assert.equal((await f.replacement({ ...input, code: code() }, another.token)).httpStatus, 409);
+  assert.equal((await f.status(input.code, another.token)).httpStatus, 404);
+  await f.reopen();
+  assert.deepEqual(await f.status(input.code), issued);
+  assert.equal((await f.redeem(input.code, f.parent, f.child.user.id)).status, 'redeemed');
+  assert.equal((await f.redeem(input.code)).replayed, true);
+  assert.equal((await f.redeem(input.code, f.sibling)).httpStatus, 409);
+  for (const who of [f.parent, f.parent2, f.child]) {
+    const state = await f.state(who);
+    assert.equal(state.transactions.length, 1);
+    assert.equal(state.notifications.length, 1);
+    const transaction = state.transactions[0];
+    assert.equal(transaction.amountCents, 5175);
+    assert.equal(transaction.merchant, 'File edits · manual replacement');
+    assert.match(transaction.note, /344 edits · 1 report · \$51\.60 earned · \+\$0\.15 adjustment: Manual replacement credit/);
+    assert.ok(state.notifications[0].body.includes(transaction.note));
+    const receipt = await f.request('GET', `/transactions/${transaction.id}/items`, undefined, who.token);
+    assert.equal(receipt.totalCount, 344);
+    assert.equal(receipt.omittedCount, 0);
+    assert.deepEqual(receipt.items.map(({ reportId, ...item }) => item), input.replacementReport.items);
+    assert.equal((await f.request('GET', `/transactions/${transaction.id}/items`, undefined, f.sibling.token)).httpStatus, 404);
+  }
+  assert.deepEqual((await f.state(f.sibling)).transactions, []);
+  assert.deepEqual((await f.state(f.sibling)).notifications, []);
+  assert.equal((await f.status(separate)).amountCents, 15);
+  assert.equal((await f.status(separate)).status, 'issued');
+  assert.equal((await f.replacement(input)).status, 'redeemed');
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_reports').get().count, 2);
+});
+
+test('manual replacements validate actual rate, counts, items, reason and amount without ordinary-session access', async t => {
+  const f = await fixture(t);
+  const input = replacementInput();
+  for (const change of [{ amountCents: 0 }, { amountCents: -1 }, { amountCents: 1.2 }, { amountCents: '5175' },
+    { amountCents: true }, { amountCents: 1_000_001 }, { amountCents: 5160 }, { reason: '' }, { reason: 'x'.repeat(161) },
+    { reason: 'private\nline' }, { reason: 'line\u0085next' }, { reason: '\uD800' }, { replacementReport: null },
+    { replacementReport: { ...input.replacementReport, priceCents: 16 } },
+    { replacementReport: { ...input.replacementReport, movieCount: 0 } },
+    { replacementReport: { ...input.replacementReport, items: [{ path: 'C:/private.txt', status: 'modified' }] } }]) {
+    assert.equal((await f.replacement({ ...input, ...change })).httpStatus, 400, JSON.stringify(change));
+  }
+  for (const token of [f.parent.token, f.child.token, 'fts_' + code()]) assert.equal((await f.replacement(input, token)).httpStatus, 401);
+  assert.equal((await f.request('POST', '/fts/vouchers/replacement', input)).httpStatus, 401);
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_vouchers').get().count, 0);
+  // Signed corrections are explicit while the final credit stays positive.
+  const negative = { ...input, amountCents: 5000, reason: 'Corrected total' };
+  assert.equal((await f.replacement(negative)).adjustmentCents, -160);
+  await f.redeem(negative.code);
+  assert.match((await f.state(f.child)).transactions[0].note, /−\$1\.60 adjustment: Corrected total/);
+  await f.request('POST', `/fts/issuers/${f.issuer.issuer.id}/revoke`, {}, f.parent.token);
+  assert.equal((await f.replacement(replacementInput('after-revoke'))).httpStatus, 403);
+});
+
+test('replacement codes never convert an existing normal voucher or duplicate an existing report in any family account', async t => {
+  const f = await fixture(t);
+  const input = replacementInput();
+  await f.mint(input.code, [input.replacementReport]);
+  assert.equal((await f.replacement(input)).httpStatus, 409);
+  assert.equal((await f.replacement({ ...input, code: code() })).httpStatus, 409);
+  await f.redeem(input.code);
+  assert.equal((await f.replacement({ ...input, code: code() })).httpStatus, 409);
+  assert.equal((await f.state(f.child)).members[0].balanceCents, 5160);
+  const other = await f.request('POST', '/families', { familyName: 'Another family', name: 'Other parent', username: 'parent1', password: 'other-pass-123' });
+  assert.equal((await f.preview(input.code, other)).httpStatus, 404);
+  const otherIssuer = await f.request('POST', '/fts/issuers', { name: 'Other family tracker', priceCents: 15 }, other.token);
+  const otherToken = 'fts_' + code();
+  await f.request('POST', '/fts/pair', { setupCode: otherIssuer.setupCode, credential: otherToken });
+  assert.equal((await f.replacement({ ...input, code: code() }, otherToken)).httpStatus, 200);
+  assert.equal((await f.status(input.code, otherToken)).httpStatus, 404);
+  assert.equal((await f.state(f.child)).members[0].balanceCents, 5160);
+});
+
+test('replacement gzip decoding is route-specific and rejects corrupt, unsupported and oversized bodies without writes', async t => {
+  const f = await fixture(t);
+  const input = replacementInput();
+  const encoded = gzipSync(Buffer.from(JSON.stringify(input)));
+  for (const encoding of ['br', 'deflate', 'gzip, gzip']) assert.equal((await f.encoded('/fts/vouchers/replacement', encoded, encoding)).httpStatus, 415);
+  assert.equal((await f.encoded('/fts/vouchers', encoded)).httpStatus, 415);
+  assert.equal((await f.encoded('/fts/vouchers/status', encoded)).httpStatus, 415);
+  assert.equal((await f.encoded('/fts/vouchers/replacement', Buffer.from('not gzip'))).httpStatus, 400);
+  assert.equal((await f.encoded('/fts/vouchers/replacement', encoded.subarray(0, encoded.length - 4))).httpStatus, 400);
+  assert.equal((await f.encoded('/fts/vouchers/replacement', gzipSync(Buffer.from('not JSON')))).httpStatus, 400);
+  assert.equal((await f.encoded('/fts/vouchers/replacement', Buffer.alloc(512 * 1024 + 1))).httpStatus, 413);
+  const bomb = gzipSync(Buffer.from(JSON.stringify({ ...input, padding: 'x'.repeat(512 * 1024) })));
+  assert.ok(bomb.length < 16384);
+  assert.equal((await f.encoded('/fts/vouchers/replacement', bomb)).httpStatus, 413);
+  const member = gzipSync(Buffer.alloc(300 * 1024, 32));
+  assert.equal((await f.encoded('/fts/vouchers/replacement', Buffer.concat([member, member]))).httpStatus, 413);
+  assert.equal(f.app.store.db.prepare('SELECT COUNT(*) AS count FROM fts_vouchers').get().count, 0);
+  assert.equal((await f.encoded('/fts/vouchers/replacement', encoded)).httpStatus, 200);
+});
+
+test('manual replacement metadata failure rolls back the voucher and report, and deletion clears all adjustment data', async t => {
+  const f = await fixture(t);
+  const input = replacementInput();
+  input.replacementReport.items = [{ path: 'file.txt', status: 'modified' }];
+  f.app.store.db.exec("CREATE TRIGGER reject_adjustment BEFORE INSERT ON fts_voucher_adjustments BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;");
+  assert.equal((await f.replacement(input)).httpStatus, 500);
+  for (const table of ['fts_vouchers', 'fts_reports', 'fts_report_items', 'fts_voucher_adjustments', 'transactions']) {
+    assert.equal(f.app.store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0);
+  }
+  f.app.store.db.exec('DROP TRIGGER reject_adjustment');
+  assert.equal((await f.replacement(input)).httpStatus, 200);
+  await f.redeem(input.code);
+  assert.equal((await f.request('DELETE', '/family', { confirmation: 'DELETE-FAMILY', familyCode: f.parent.familyCode }, f.parent.token)).httpStatus, 200);
+  for (const table of ['fts_vouchers', 'fts_reports', 'fts_report_items', 'fts_voucher_adjustments', 'transactions']) {
+    assert.equal(f.app.store.db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get().count, 0);
+  }
+  await f.reopen();
+  assert.equal((await f.request('GET', '/health')).setupRequired, true);
+  assert.equal((await f.status(input.code)).httpStatus, 401);
 });
